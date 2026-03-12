@@ -636,7 +636,7 @@ export default function App() {
     <div className="desktop-shell">
       <header className="chrome-bar">
         <div className="chrome-brand">
-          <img alt="SkillViewer Logo" className="chrome-brand-logo" src="/logo.webp" />
+          <img alt="SkillViewer Logo" className="chrome-brand-logo" src="./logo.webp" />
           <div className="chrome-brand-copy">
             <strong>SkillViewer</strong>
             <span>Local skill library for macOS</span>
