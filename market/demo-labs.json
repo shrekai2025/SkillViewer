@@ -1,0 +1,26 @@
+{
+  "skills": [
+    {
+      "id": "workflow-checkpoints",
+      "slug": "workflow-checkpoints",
+      "name": "Workflow Checkpoints",
+      "description": "为长任务自动生成阶段断点、回退点和交付检查项。",
+      "author": "SkillViewer Labs",
+      "version": "0.9.0",
+      "downloadUrl": "./zips/workflow-checkpoints.zip",
+      "homepageUrl": "https://example.com/skills/workflow-checkpoints",
+      "tags": ["planning", "delivery", "ops"]
+    },
+    {
+      "id": "brief-writer-zh",
+      "slug": "brief-writer-zh",
+      "name": "Brief Writer ZH",
+      "description": "把产品、设计、开发输入快速整理成中文简报或执行摘要。",
+      "author": "SkillViewer Labs",
+      "version": "0.8.2",
+      "downloadUrl": "./zips/brief-writer-zh.zip",
+      "homepageUrl": "https://example.com/skills/brief-writer-zh",
+      "tags": ["zh-CN", "brief", "summary"]
+    }
+  ]
+}

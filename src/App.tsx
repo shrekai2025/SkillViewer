@@ -11,6 +11,7 @@ import {
   ArrowLeft,
   ChevronDown,
   CircleOff,
+  Download,
   Eye,
   FileCode2,
   Filter,
@@ -26,13 +27,25 @@ import {
   Search,
   ShieldCheck,
   Sparkles,
+  Store,
   Sun,
   Trash2,
+  X,
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
-import type { AppSnapshot, DetailMode, SkillRecord, SkillSource, SourceKind } from './shared/contracts'
+import type {
+  AppSnapshot,
+  AppTab,
+  DetailMode,
+  MarketRegistry,
+  MarketSkill,
+  MarketSnapshot,
+  SkillRecord,
+  SkillSource,
+  SourceKind,
+} from './shared/contracts'
 
 interface ToastMessage {
   id: number
@@ -41,6 +54,7 @@ interface ToastMessage {
 }
 
 const ALL_SOURCES_ID = 'all'
+const MARKET_PAGE_SIZE = 18
 
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: 'medium',
@@ -71,6 +85,22 @@ function getKindLabel(kind: SourceKind) {
   return '自定义'
 }
 
+function getRegistryStatusLabel(status: MarketRegistry['status']) {
+  if (status === 'ready') {
+    return '可用'
+  }
+
+  if (status === 'disabled') {
+    return '已停用'
+  }
+
+  return '错误'
+}
+
+function isExternalUrl(value: string | null | undefined) {
+  return typeof value === 'string' && /^https?:\/\//i.test(value)
+}
+
 function sortSkills(skills: SkillRecord[]) {
   return [...skills].sort((left, right) => {
     if (left.enabled !== right.enabled) {
@@ -79,6 +109,16 @@ function sortSkills(skills: SkillRecord[]) {
 
     return right.updatedAt.localeCompare(left.updatedAt)
   })
+}
+
+function mergeMarketSkillPages(current: MarketSkill[], incoming: MarketSkill[]) {
+  const merged = new Map(current.map((skill) => [skill.id, skill]))
+  for (const skill of incoming) {
+    if (!merged.has(skill.id)) {
+      merged.set(skill.id, skill)
+    }
+  }
+  return [...merged.values()]
 }
 
 function getSelection(skills: SkillRecord[], currentSelection: string | null) {
@@ -248,10 +288,94 @@ function SkillCard({
   )
 }
 
+function MarketCard({
+  active,
+  installing,
+  installed,
+  onClick,
+  onInstall,
+  skill,
+}: {
+  active: boolean
+  installing: boolean
+  installed: boolean
+  onClick: () => void
+  onInstall: () => void
+  skill: MarketSkill
+}) {
+  return (
+    <article
+      className={`market-card ${active ? 'is-active' : ''}`}
+      onClick={onClick}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          onClick()
+        }
+      }}
+      role="button"
+      tabIndex={0}
+    >
+      <div className="market-card-header">
+        <div className="market-card-copy">
+          <strong>{skill.name}</strong>
+          <span>{skill.registryLabel} · v{skill.version}</span>
+        </div>
+
+        <button
+          className={`market-action ${installed ? 'is-installed' : ''}`}
+          disabled={installing || installed}
+          onClick={(event) => {
+            event.stopPropagation()
+          onInstall()
+        }}
+          type="button"
+        >
+          {installed ? '已安装' : installing ? '安装中...' : (
+            <>
+              <Download size={13} />
+              下载
+            </>
+          )}
+        </button>
+      </div>
+
+      <p className="market-card-description">{skill.description}</p>
+
+      <div className="market-card-footer">
+        <div className="market-card-tags">
+          {skill.tags.slice(0, 3).map((tag) => (
+            <span className="market-tag" key={tag}>
+              {tag}
+            </span>
+          ))}
+        </div>
+
+        <span className="market-card-author">{skill.author}</span>
+      </div>
+    </article>
+  )
+}
+
 export default function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null)
+  const [activeTab, setActiveTab] = useState<AppTab>(() => {
+    return (localStorage.getItem('skillviewer-active-tab') as AppTab) || 'library'
+  })
   const [selectedSourceId, setSelectedSourceId] = useState<string>(ALL_SOURCES_ID)
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null)
+  const [marketSnapshot, setMarketSnapshot] = useState<MarketSnapshot | null>(null)
+  const [marketSkills, setMarketSkills] = useState<MarketSkill[]>([])
+  const [marketCursor, setMarketCursor] = useState<string | null>(null)
+  const [marketHasMore, setMarketHasMore] = useState(false)
+  const [selectedMarketRegistryId, setSelectedMarketRegistryId] = useState<string>('all')
+  const [selectedMarketSkillId, setSelectedMarketSkillId] = useState<string | null>(null)
+  const [marketQuery, setMarketQuery] = useState('')
+  const [marketInstallId, setMarketInstallId] = useState<string | null>(null)
+  const [marketBusyAction, setMarketBusyAction] = useState<'load-more' | 'refresh' | 'registry' | null>(null)
+  const [isAddRegistryDialogOpen, setIsAddRegistryDialogOpen] = useState(false)
+  const [newRegistryLabel, setNewRegistryLabel] = useState('')
+  const [newRegistryUrl, setNewRegistryUrl] = useState('')
   const [detailMode, setDetailMode] = useState<DetailMode>('preview')
   const [searchValue, setSearchValue] = useState('')
   const [drafts, setDrafts] = useState<Record<string, string>>({})
@@ -272,7 +396,18 @@ export default function App() {
   })
 
   const deferredSearch = useDeferredValue(searchValue)
+  const deferredMarketQuery = useDeferredValue(marketQuery)
   const desktopApi = typeof window !== 'undefined' ? window.skillviewer : undefined
+
+  useEffect(() => {
+    localStorage.setItem('skillviewer-active-tab', activeTab)
+  }, [activeTab])
+
+  useEffect(() => {
+    if (activeTab !== 'market' && isAddRegistryDialogOpen) {
+      setIsAddRegistryDialogOpen(false)
+    }
+  }, [activeTab, isAddRegistryDialogOpen])
 
   useEffect(() => {
     const root = window.document.documentElement
@@ -316,6 +451,23 @@ export default function App() {
     return () => document.removeEventListener('click', hideMenu)
   }, [])
 
+  useEffect(() => {
+    if (!isAddRegistryDialogOpen) {
+      return
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setIsAddRegistryDialogOpen(false)
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [isAddRegistryDialogOpen])
+
   function pushToast(tone: ToastMessage['tone'], message: string) {
     const id = Date.now() + Math.round(Math.random() * 1000)
     setToasts((current) => [...current, { id, message, tone }])
@@ -348,6 +500,85 @@ export default function App() {
       pushToast('error', message)
     } finally {
       setBusyAction((current) => (current === 'refresh' ? null : current))
+    }
+  }
+
+  async function refreshMarketSnapshot(
+    successMessage?: string,
+    options?: { query?: string; registryId?: string },
+  ) {
+    if (!desktopApi) {
+      return
+    }
+
+    const nextQuery = options?.query ?? deferredMarketQuery
+    const nextRegistryId = options?.registryId ?? selectedMarketRegistryId
+    setMarketBusyAction('refresh')
+
+    try {
+      const [nextSnapshot, nextPage] = await Promise.all([
+        desktopApi.getMarketSnapshot(),
+        desktopApi.browseMarketSkills({
+          cursor: null,
+          limit: MARKET_PAGE_SIZE,
+          query: nextQuery,
+          registryId: nextRegistryId,
+        }),
+      ])
+
+      startTransition(() => {
+        setMarketSnapshot(nextSnapshot)
+        setMarketSkills(nextPage.skills)
+        setMarketCursor(nextPage.cursor)
+        setMarketHasMore(nextPage.hasMore)
+        setSelectedMarketSkillId((current) => {
+          if (current && nextPage.skills.some((skill) => skill.id === current)) {
+            return current
+          }
+          return nextPage.skills[0]?.id ?? null
+        })
+      })
+
+      if (successMessage) {
+        pushToast('success', successMessage)
+      }
+    } catch (error) {
+      pushToast('error', getErrorMessage(error))
+    } finally {
+      setMarketBusyAction((current) => (current === 'refresh' ? null : current))
+    }
+  }
+
+  async function loadMoreMarketSkills() {
+    if (!desktopApi || !marketHasMore || !marketCursor) {
+      return
+    }
+
+    setMarketBusyAction('load-more')
+
+    try {
+      const nextPage = await desktopApi.browseMarketSkills({
+        cursor: marketCursor,
+        limit: MARKET_PAGE_SIZE,
+        query: deferredMarketQuery,
+        registryId: selectedMarketRegistryId,
+      })
+
+      startTransition(() => {
+        setMarketSkills((current) => mergeMarketSkillPages(current, nextPage.skills))
+        setMarketCursor(nextPage.cursor)
+        setMarketHasMore(nextPage.hasMore)
+        setSelectedMarketSkillId((current) => {
+          if (current) {
+            return current
+          }
+          return nextPage.skills[0]?.id ?? null
+        })
+      })
+    } catch (error) {
+      pushToast('error', getErrorMessage(error))
+    } finally {
+      setMarketBusyAction((current) => (current === 'load-more' ? null : current))
     }
   }
 
@@ -395,6 +626,96 @@ export default function App() {
     }
   }, [desktopApi])
 
+  useEffect(() => {
+    if (!desktopApi || activeTab !== 'market') {
+      return
+    }
+
+    const api = desktopApi
+    let isMounted = true
+
+    async function loadMarket() {
+      setMarketBusyAction('refresh')
+
+      try {
+        const nextSnapshot = await api.getMarketSnapshot()
+        if (!isMounted) {
+          return
+        }
+
+        startTransition(() => {
+          setMarketSnapshot(nextSnapshot)
+        })
+      } catch (error) {
+        if (isMounted) {
+          pushToast('error', getErrorMessage(error))
+        }
+      } finally {
+        if (isMounted) {
+          setMarketBusyAction((current) => (current === 'refresh' ? null : current))
+        }
+      }
+    }
+
+    void loadMarket()
+
+    return () => {
+      isMounted = false
+    }
+  }, [activeTab, desktopApi])
+
+  useEffect(() => {
+    if (!desktopApi || activeTab !== 'market') {
+      return
+    }
+
+    const api = desktopApi
+    let isMounted = true
+
+    async function loadMarketPage() {
+      setMarketBusyAction('refresh')
+
+      try {
+        const nextPage = await api.browseMarketSkills({
+          cursor: null,
+          limit: MARKET_PAGE_SIZE,
+          query: deferredMarketQuery,
+          registryId: selectedMarketRegistryId,
+        })
+
+        if (!isMounted) {
+          return
+        }
+
+        startTransition(() => {
+          setMarketSkills(nextPage.skills)
+          setMarketCursor(nextPage.cursor)
+          setMarketHasMore(nextPage.hasMore)
+          setSelectedMarketSkillId((current) => {
+            if (current && nextPage.skills.some((skill) => skill.id === current)) {
+              return current
+            }
+            return nextPage.skills[0]?.id ?? null
+          })
+        })
+      } catch (error) {
+        if (isMounted) {
+          pushToast('error', getErrorMessage(error))
+        }
+      } finally {
+        if (isMounted) {
+          setMarketBusyAction((current) => (current === 'refresh' ? null : current))
+        }
+      }
+    }
+
+    void loadMarketPage()
+
+    return () => {
+      isMounted = false
+    }
+  }, [activeTab, deferredMarketQuery, desktopApi, selectedMarketRegistryId])
+
   const skills = snapshot?.skills ?? []
   const visibleSkills = skills.filter((skill) => {
     const matchesSource = selectedSourceId === ALL_SOURCES_ID || skill.sourceId === selectedSourceId
@@ -420,6 +741,8 @@ export default function App() {
     )
   })
 
+  const visibleMarketSkills = marketSkills
+
   useEffect(() => {
     if (visibleSkills.length === 0) {
       if (selectedSkillId !== null) {
@@ -437,6 +760,23 @@ export default function App() {
   }, [selectedSkillId, visibleSkills])
 
   useEffect(() => {
+    if (visibleMarketSkills.length === 0) {
+      if (selectedMarketSkillId !== null) {
+        setSelectedMarketSkillId(null)
+      }
+      return
+    }
+
+    const isSelectedStillVisible =
+      selectedMarketSkillId !== null &&
+      visibleMarketSkills.some((skill) => skill.id === selectedMarketSkillId)
+
+    if (!isSelectedStillVisible) {
+      setSelectedMarketSkillId(visibleMarketSkills[0].id)
+    }
+  }, [selectedMarketSkillId, visibleMarketSkills])
+
+  useEffect(() => {
     function handleBeforeUnload(e: BeforeUnloadEvent) {
       if (Object.keys(drafts).length > 0) {
         e.preventDefault()
@@ -450,8 +790,15 @@ export default function App() {
     visibleSkills.find((skill) => skill.id === selectedSkillId) ??
     skills.find((skill) => skill.id === selectedSkillId) ??
     null
+  const selectedMarketSkill =
+    visibleMarketSkills.find((skill) => skill.id === selectedMarketSkillId) ??
+    marketSkills.find((skill) => skill.id === selectedMarketSkillId) ??
+    null
 
   const selectedSource = snapshot?.sources.find((source) => source.id === selectedSourceId) ?? null
+  const marketRegistries = marketSnapshot?.registries ?? []
+  const selectedMarketRegistry =
+    marketRegistries.find((registry) => registry.id === selectedMarketRegistryId) ?? null
   const draftContent = selectedSkill ? drafts[selectedSkill.id] ?? selectedSkill.rawContent : ''
   const hasUnsavedChanges = selectedSkill ? draftContent !== selectedSkill.rawContent : false
   const previewSource = parseMarkdownSource(selectedSkill ? selectedSkill.rawContent : '')
@@ -460,6 +807,21 @@ export default function App() {
   const customSources = (snapshot?.sources ?? []).filter((source) => !source.system)
   const visibleEnabledCount = visibleSkills.filter((skill) => skill.enabled && !skill.systemDisabled).length
   const visibleDisabledCount = visibleSkills.length - visibleEnabledCount
+  const installedSkillNameSet = new Set(skills.map((skill) => skill.name.trim().toLowerCase()))
+  const visibleInstalledMarketCount = visibleMarketSkills.filter((skill) =>
+    installedSkillNameSet.has(skill.name.trim().toLowerCase()),
+  ).length
+  const selectedMarketSkillInstalled = selectedMarketSkill
+    ? installedSkillNameSet.has(selectedMarketSkill.name.trim().toLowerCase())
+    : false
+  const marketSkillCounts = new Map<string, number>()
+  for (const skill of marketSkills) {
+    marketSkillCounts.set(skill.registryId, (marketSkillCounts.get(skill.registryId) ?? 0) + 1)
+  }
+  const readyRegistryCount = marketRegistries.filter((registry) => registry.status === 'ready').length
+  const remoteReadyRegistryCount = marketRegistries.filter(
+    (registry) => registry.status === 'ready' && /^https?:\/\//i.test(registry.manifestUrl),
+  ).length
 
   function replaceSkill(nextSkill: SkillRecord, previousId: string) {
     startTransition(() => {
@@ -591,6 +953,85 @@ export default function App() {
     }
   }
 
+  async function handleOpenExternal(url: string) {
+    if (!desktopApi || !isExternalUrl(url)) {
+      return
+    }
+
+    try {
+      await desktopApi.openExternal(url)
+    } catch (error) {
+      pushToast('error', getErrorMessage(error))
+    }
+  }
+
+  async function handleInstallMarketSkill(skill: MarketSkill) {
+    if (!desktopApi) {
+      return
+    }
+
+    setMarketInstallId(skill.id)
+
+    try {
+      const result = await desktopApi.installMarketSkill({ skill })
+      await refreshSnapshot()
+      await refreshMarketSnapshot()
+      pushToast('success', `已安装到 ${result.installedPath}`)
+    } catch (error) {
+      pushToast('error', getErrorMessage(error))
+    } finally {
+      setMarketInstallId((current) => (current === skill.id ? null : current))
+    }
+  }
+
+  async function handleAddMarketRegistry() {
+    if (!desktopApi || !newRegistryUrl.trim()) {
+      return
+    }
+
+    setMarketBusyAction('registry')
+
+    try {
+      await desktopApi.addMarketRegistry({
+        label: newRegistryLabel.trim(),
+        manifestUrl: newRegistryUrl.trim(),
+      })
+      setSelectedMarketRegistryId('all')
+      setNewRegistryLabel('')
+      setNewRegistryUrl('')
+      setIsAddRegistryDialogOpen(false)
+      await refreshMarketSnapshot(undefined, { query: deferredMarketQuery, registryId: 'all' })
+      pushToast('success', 'Registry 已添加。')
+    } catch (error) {
+      pushToast('error', getErrorMessage(error))
+    } finally {
+      setMarketBusyAction((current) => (current === 'registry' ? null : current))
+    }
+  }
+
+  async function handleRemoveMarketRegistry(registryId: string) {
+    if (!desktopApi) {
+      return
+    }
+
+    setMarketBusyAction('registry')
+
+    try {
+      const nextRegistryId = selectedMarketRegistryId === registryId ? 'all' : selectedMarketRegistryId
+      setSelectedMarketRegistryId(nextRegistryId)
+      await desktopApi.removeMarketRegistry(registryId)
+      await refreshMarketSnapshot(undefined, {
+        query: deferredMarketQuery,
+        registryId: nextRegistryId,
+      })
+      pushToast('info', 'Registry 已移除。')
+    } catch (error) {
+      pushToast('error', getErrorMessage(error))
+    } finally {
+      setMarketBusyAction((current) => (current === 'registry' ? null : current))
+    }
+  }
+
   const handleSaveShortcut = useEffectEvent(() => {
     if (detailMode === 'edit' && hasUnsavedChanges && busyAction !== 'save') {
       void handleSave()
@@ -631,82 +1072,126 @@ export default function App() {
   const selectedSourceSubtitle = selectedSource
     ? `${getKindLabel(selectedSource.kind)} 来源 · ${selectedSource.path}`
     : '跨所有来源聚合浏览'
+  const selectedMarketTitle = selectedMarketRegistry ? selectedMarketRegistry.label : 'Market'
+  const selectedMarketSubtitle = selectedMarketRegistry
+    ? '按需浏览当前 registry 的技能结果，支持搜索、安装和逐步继续加载。'
+    : '聚合多个 registry 的技能结果，并按需分批加载可安装的 skills。'
+  const selectedMarketRegistryLoadedCount = selectedMarketRegistry
+    ? (marketSkillCounts.get(selectedMarketRegistry.id) ?? 0)
+    : 0
 
   return (
     <div className="desktop-shell">
       <header className="chrome-bar">
-        <div className="chrome-brand">
-          <img alt="SkillViewer Logo" className="chrome-brand-logo" src="./logo.webp" />
-          <div className="chrome-brand-copy">
-            <strong>SkillViewer</strong>
-            <span>Local skill library for macOS</span>
+        <div className="chrome-brand-group">
+          <div className="chrome-brand">
+            <img alt="SkillViewer Logo" className="chrome-brand-logo" src="./logo.webp" />
+            <div className="chrome-brand-copy">
+              <strong>SkillViewer</strong>
+              <span>Local skill library for macOS</span>
+            </div>
+          </div>
+
+          <div className="workspace-switch">
+            <button
+              className={activeTab === 'library' ? 'is-active' : ''}
+              onClick={() => setActiveTab('library')}
+              type="button"
+            >
+              <Folders size={14} />
+              Library
+            </button>
+            <button
+              className={activeTab === 'market' ? 'is-active' : ''}
+              onClick={() => setActiveTab('market')}
+              type="button"
+            >
+              <Store size={14} />
+              Market
+            </button>
           </div>
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <div style={{ position: 'relative' }} ref={filterRef}>
-            <button
-              className="chrome-button"
-              onClick={() => setIsFilterOpen(!isFilterOpen)}
-              type="button"
-            >
-              <Filter size={15} />
-              <ChevronDown size={12} />
-            </button>
+          {activeTab === 'library' ? (
+            <>
+              <div style={{ position: 'relative' }} ref={filterRef}>
+                <button
+                  className="chrome-button"
+                  onClick={() => setIsFilterOpen(!isFilterOpen)}
+                  type="button"
+                >
+                  <Filter size={15} />
+                  <ChevronDown size={12} />
+                </button>
 
-            {isFilterOpen && (
-              <div style={{
-                position: 'absolute', top: '100%', left: 0, marginTop: '8px',
-                background: 'var(--panel-bg)', border: '1px solid var(--line)',
-                borderRadius: '8px', padding: '16px', boxShadow: 'var(--shadow-lg)',
-                zIndex: 100, width: '200px', display: 'flex', flexDirection: 'column', gap: '16px'
-              }}>
-                <div>
-                  <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-soft)', marginBottom: '8px', textTransform: 'uppercase' }}>来源 (Source)</div>
-                  <select
-                    style={{ width: '100%', padding: '6px', fontSize: '12px', background: 'var(--button-bg)', border: '1px solid var(--line)', borderRadius: '4px', color: 'var(--text)', outline: 'none' }}
-                    value={selectedSourceId}
-                    onChange={(e) => setSelectedSourceId(e.target.value)}
-                  >
-                    <option value={ALL_SOURCES_ID}>所有来源</option>
-                    {snapshot?.sources.map((src) => (
-                      <option key={src.id} value={src.id}>{src.label}</option>
-                    ))}
-                  </select>
-                </div>
+                {isFilterOpen && (
+                  <div style={{
+                    position: 'absolute', top: '100%', left: 0, marginTop: '8px',
+                    background: 'var(--panel-bg)', border: '1px solid var(--line)',
+                    borderRadius: '8px', padding: '16px', boxShadow: 'var(--shadow-lg)',
+                    zIndex: 100, width: '200px', display: 'flex', flexDirection: 'column', gap: '16px'
+                  }}>
+                    <div>
+                      <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-soft)', marginBottom: '8px', textTransform: 'uppercase' }}>来源 (Source)</div>
+                      <select
+                        style={{ width: '100%', padding: '6px', fontSize: '12px', background: 'var(--button-bg)', border: '1px solid var(--line)', borderRadius: '4px', color: 'var(--text)', outline: 'none' }}
+                        value={selectedSourceId}
+                        onChange={(e) => setSelectedSourceId(e.target.value)}
+                      >
+                        <option value={ALL_SOURCES_ID}>所有来源</option>
+                        {snapshot?.sources.map((src) => (
+                          <option key={src.id} value={src.id}>{src.label}</option>
+                        ))}
+                      </select>
+                    </div>
 
-                <div>
-                  <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-soft)', marginBottom: '8px', textTransform: 'uppercase' }}>状态 (Status)</div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '12px' }}>
-                    <label style={{ display: 'flex', gap: '6px', cursor: 'pointer', alignItems: 'center' }}>
-                      <input type="radio" checked={filterMode === 'all'} onChange={() => { setFilterMode('all'); localStorage.setItem('eagle-filter-mode', 'all') }} />
-                      所有状态
-                    </label>
-                    <label style={{ display: 'flex', gap: '6px', cursor: 'pointer', alignItems: 'center' }}>
-                      <input type="radio" checked={filterMode === 'enabled'} onChange={() => { setFilterMode('enabled'); localStorage.setItem('eagle-filter-mode', 'enabled') }} />
-                      仅显示启用
-                    </label>
-                    <label style={{ display: 'flex', gap: '6px', cursor: 'pointer', alignItems: 'center' }}>
-                      <input type="radio" checked={filterMode === 'disabled'} onChange={() => { setFilterMode('disabled'); localStorage.setItem('eagle-filter-mode', 'disabled') }} />
-                      仅显示停用
-                    </label>
+                    <div>
+                      <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-soft)', marginBottom: '8px', textTransform: 'uppercase' }}>状态 (Status)</div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '12px' }}>
+                        <label style={{ display: 'flex', gap: '6px', cursor: 'pointer', alignItems: 'center' }}>
+                          <input type="radio" checked={filterMode === 'all'} onChange={() => { setFilterMode('all'); localStorage.setItem('eagle-filter-mode', 'all') }} />
+                          所有状态
+                        </label>
+                        <label style={{ display: 'flex', gap: '6px', cursor: 'pointer', alignItems: 'center' }}>
+                          <input type="radio" checked={filterMode === 'enabled'} onChange={() => { setFilterMode('enabled'); localStorage.setItem('eagle-filter-mode', 'enabled') }} />
+                          仅显示启用
+                        </label>
+                        <label style={{ display: 'flex', gap: '6px', cursor: 'pointer', alignItems: 'center' }}>
+                          <input type="radio" checked={filterMode === 'disabled'} onChange={() => { setFilterMode('disabled'); localStorage.setItem('eagle-filter-mode', 'disabled') }} />
+                          仅显示停用
+                        </label>
+                      </div>
+                    </div>
                   </div>
-                </div>
+                )}
               </div>
-            )}
-          </div>
 
-          <label className="global-search">
-            <Search size={15} />
-            <input
-              onChange={(event) => {
-                setSearchValue(event.target.value)
-              }}
-              placeholder="搜索名称、描述、来源、路径"
-              type="search"
-              value={searchValue}
-            />
-          </label>
+              <label className="global-search">
+                <Search size={15} />
+                <input
+                  onChange={(event) => {
+                    setSearchValue(event.target.value)
+                  }}
+                  placeholder="搜索名称、描述、来源、路径"
+                  type="search"
+                  value={searchValue}
+                />
+              </label>
+            </>
+          ) : (
+            <label className="global-search">
+              <Search size={15} />
+              <input
+                onChange={(event) => {
+                  setMarketQuery(event.target.value)
+                }}
+                placeholder="搜索 Market 名称、描述、作者、标签"
+                type="search"
+                value={marketQuery}
+              />
+            </label>
+          )}
         </div>
 
         <div className="chrome-actions">
@@ -725,11 +1210,15 @@ export default function App() {
           <button
             className="chrome-button"
             onClick={() => {
-              void refreshSnapshot('列表已刷新。')
+              if (activeTab === 'library') {
+                void refreshSnapshot('列表已刷新。')
+              } else {
+                void refreshMarketSnapshot('Market 已刷新。')
+              }
             }}
             type="button"
           >
-            <RefreshCw className={busyAction === 'refresh' ? 'is-spinning' : ''} size={15} />
+            <RefreshCw className={(busyAction === 'refresh' || marketBusyAction === 'refresh') ? 'is-spinning' : ''} size={15} />
             刷新
           </button>
         </div>
@@ -737,402 +1226,1039 @@ export default function App() {
 
       <div className="workspace">
         <aside className="nav-pane">
-          <div className="nav-block">
-            <div className="nav-caption">Library</div>
-            <SourceItem
-              active={selectedSourceId === ALL_SOURCES_ID}
-              count={skills.length}
-              label="All Skills"
-              meta="跨来源聚合"
-              onClick={() => {
-                setSelectedSourceId(ALL_SOURCES_ID)
-              }}
-            />
-          </div>
-
-          <div className="nav-block">
-            <div className="nav-caption">系统来源</div>
-            {systemSources.map((source) => (
-              <SourceItem
-                active={selectedSourceId === source.id}
-                count={sourceCounts.get(source.id) ?? 0}
-                key={source.id}
-                label={source.label}
-                meta={`${getKindLabel(source.kind)} · ${source.path}`}
-                onClick={() => {
-                  setSelectedSourceId(source.id)
-                }}
-              />
-            ))}
-          </div>
-
-          <div className="nav-block">
-            <div className="nav-caption" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingRight: '12px' }}>
-              <span>自定义来源</span>
-              <button
-                className="source-remove"
-                onClick={(e) => { e.stopPropagation(); void handleAddSource() }}
-                title="添加自定义来源"
-                type="button"
-                style={{ opacity: 0.6, cursor: 'pointer' }}
-              >
-                <FolderPlus size={13} />
-              </button>
-            </div>
-            {customSources.length === 0 ? (
-              <EmptyState
-                compact
-                description="还没有接入自定义 skill 文件夹。"
-                title="空来源"
-              />
-            ) : (
-              customSources.map((source) => (
+          {activeTab === 'library' ? (
+            <>
+              <div className="nav-block">
+                <div className="nav-caption">Library</div>
                 <SourceItem
-                  active={selectedSourceId === source.id}
-                  count={sourceCounts.get(source.id) ?? 0}
-                  key={source.id}
-                  label={source.label}
-                  meta={`${getKindLabel(source.kind)} · ${source.path}`}
+                  active={selectedSourceId === ALL_SOURCES_ID}
+                  count={skills.length}
+                  label="All Skills"
+                  meta="跨来源聚合"
                   onClick={() => {
-                    setSelectedSourceId(source.id)
+                    setSelectedSourceId(ALL_SOURCES_ID)
                   }}
-                  onRemove={() => {
-                    void handleRemoveSource(source)
-                  }}
-                  removable
                 />
-              ))
-            )}
-          </div>
+              </div>
 
-          <div className="nav-summary">
-            <div className="summary-card">
-              <span>总 Skill</span>
-              <strong>{skills.length}</strong>
-            </div>
-            <div className="summary-card">
-              <span>来源数</span>
-              <strong>{snapshot?.sources.length ?? 0}</strong>
-            </div>
-            <div className="summary-card">
-              <span>最近刷新</span>
-              <strong>{snapshot ? formatDate(snapshot.lastRefreshedAt) : '--'}</strong>
-            </div>
-          </div>
+              <div className="nav-block">
+                <div className="nav-caption">系统来源</div>
+                {systemSources.map((source) => (
+                  <SourceItem
+                    active={selectedSourceId === source.id}
+                    count={sourceCounts.get(source.id) ?? 0}
+                    key={source.id}
+                    label={source.label}
+                    meta={`${getKindLabel(source.kind)} · ${source.path}`}
+                    onClick={() => {
+                      setSelectedSourceId(source.id)
+                    }}
+                  />
+                ))}
+              </div>
+
+              <div className="nav-block">
+                <div className="nav-caption" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingRight: '12px' }}>
+                  <span>自定义来源</span>
+                  <button
+                    className="source-remove"
+                    onClick={(e) => { e.stopPropagation(); void handleAddSource() }}
+                    title="添加自定义来源"
+                    type="button"
+                    style={{ opacity: 0.6, cursor: 'pointer' }}
+                  >
+                    <FolderPlus size={13} />
+                  </button>
+                </div>
+                {customSources.length === 0 ? (
+                  <EmptyState
+                    compact
+                    description="还没有接入自定义 skill 文件夹。"
+                    title="空来源"
+                  />
+                ) : (
+                  customSources.map((source) => (
+                    <SourceItem
+                      active={selectedSourceId === source.id}
+                      count={sourceCounts.get(source.id) ?? 0}
+                      key={source.id}
+                      label={source.label}
+                      meta={`${getKindLabel(source.kind)} · ${source.path}`}
+                      onClick={() => {
+                        setSelectedSourceId(source.id)
+                      }}
+                      onRemove={() => {
+                        void handleRemoveSource(source)
+                      }}
+                      removable
+                    />
+                  ))
+                )}
+              </div>
+
+              <div className="nav-summary">
+                <div className="summary-card">
+                  <span>总 Skill</span>
+                  <strong>{skills.length}</strong>
+                </div>
+                <div className="summary-card">
+                  <span>来源数</span>
+                  <strong>{snapshot?.sources.length ?? 0}</strong>
+                </div>
+                <div className="summary-card">
+                  <span>最近刷新</span>
+                  <strong>{snapshot ? formatDate(snapshot.lastRefreshedAt) : '--'}</strong>
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="nav-block">
+                <div className="nav-caption">Marketplace</div>
+                <SourceItem
+                  active={selectedMarketRegistryId === 'all'}
+                  count={marketSkills.length}
+                  label="All Registries"
+                  meta="聚合市场技能"
+                  onClick={() => {
+                    setSelectedMarketRegistryId('all')
+                  }}
+                />
+              </div>
+
+              <div className="nav-block">
+                <div className="nav-caption">Registry 列表</div>
+                {(marketSnapshot?.registries ?? []).map((registry) => (
+                  <div className={`source-item ${selectedMarketRegistryId === registry.id ? 'is-active' : ''}`} key={registry.id}>
+                    <button
+                      className="source-main"
+                      onClick={() => {
+                        setSelectedMarketRegistryId(registry.id)
+                      }}
+                      type="button"
+                    >
+                      <div className="source-main-copy">
+                        <strong>{registry.label}</strong>
+                        <span>{registry.status === 'ready' ? '可用' : registry.status === 'disabled' ? '已停用' : '读取失败'}</span>
+                      </div>
+                    </button>
+
+                    <div className="source-side">
+                      <span className={`registry-status registry-${registry.status}`} />
+                      {!registry.system ? (
+                        <button
+                          className="source-remove"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            void handleRemoveMarketRegistry(registry.id)
+                          }}
+                          title="移除 Registry"
+                          type="button"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+            </>
+          )}
         </aside>
 
         <main className="library-pane">
-          {viewMode === 'grid' ? (
+          {activeTab === 'library' ? (
+            viewMode === 'grid' ? (
+              <>
+                <div className="pane-header">
+                  <div className="pane-header-copy">
+                    <span className="pane-kicker">Skill Library</span>
+                    <h1>{selectedSourceTitle}</h1>
+                    <p>{selectedSourceSubtitle}</p>
+                  </div>
+
+                  <div className="pane-metrics">
+                    <div className="metric-card">
+                      <span>可见</span>
+                      <strong>{visibleSkills.length}</strong>
+                    </div>
+                    <div className="metric-card">
+                      <span>启用</span>
+                      <strong>{visibleEnabledCount}</strong>
+                    </div>
+                    <div className="metric-card">
+                      <span>停用</span>
+                      <strong>{visibleDisabledCount}</strong>
+                    </div>
+                  </div>
+                </div>
+
+                {errorMessage ? <div className="banner error-banner">{errorMessage}</div> : null}
+
+                <div className="table-shell">
+                  <div className="table-body">
+                    {!snapshot ? (
+                      <EmptyState
+                        description="首次扫描会读取你接入的目录，并提取 frontmatter、描述和时间信息。"
+                        title="正在载入本地 skill"
+                      />
+                    ) : visibleSkills.length === 0 ? (
+                      <EmptyState
+                        description="试试切换来源、清空搜索，或者添加一个包含 `SKILL.md` 的目录。"
+                        title="没有匹配结果"
+                      />
+                    ) : (
+                      visibleSkills.map((skill) => (
+                        <SkillCard
+                          active={selectedSkillId === skill.id}
+                          key={skill.id}
+                          onClick={() => {
+                            setSelectedSkillId(skill.id)
+                          }}
+                          onDoubleClick={() => {
+                            setSelectedSkillId(skill.id)
+                            setViewMode('skill')
+                          }}
+                          onContextMenu={(x, y) => {
+                            setContextMenu({ x, y, skillId: skill.id })
+                          }}
+                          skill={skill}
+                        />
+                      ))
+                    )}
+                  </div>
+                </div>
+              </>
+            ) : !selectedSkill ? (
+              <EmptyState description="此模式下需要选中一个Skill" title="无内容" />
+            ) : (
+              <div
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  height: '100%',
+                  background: 'var(--main-bg)',
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    padding: '12px 20px',
+                    borderBottom: '1px solid var(--line)',
+                  }}
+                >
+                  <button
+                    onClick={() => {
+                      if (hasUnsavedChanges) {
+                        if (window.confirm('有未保存内容，是否丢弃？')) {
+                          setDrafts((prev) => {
+                            const next = { ...prev }
+                            if (selectedSkill) delete next[selectedSkill.id]
+                            return next
+                          })
+                          setViewMode('grid')
+                        }
+                      } else {
+                        setViewMode('grid')
+                      }
+                    }}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      background: 'transparent',
+                      border: 'none',
+                      cursor: 'pointer',
+                      color: 'var(--text-soft)',
+                      padding: '6px 0',
+                      fontSize: '13px',
+                      fontWeight: 500,
+                    }}
+                  >
+                    <ArrowLeft size={16} /> 返回列表
+                  </button>
+
+                  <div
+                    className="mode-switch"
+                    style={{ margin: 0, padding: 0, border: 'none', background: 'var(--button-bg)' }}
+                  >
+                    {[
+                      { icon: Eye, id: 'preview', label: '预览' },
+                      { icon: FileCode2, id: 'source', label: '原文' },
+                      { icon: PencilLine, id: 'edit', label: '编辑' },
+                    ].map((item) => (
+                      <button
+                        className={detailMode === item.id ? 'is-active' : ''}
+                        key={item.id}
+                        onClick={() => setDetailMode(item.id as DetailMode)}
+                        type="button"
+                      >
+                        <item.icon size={15} />
+                        {item.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <button
+                      onClick={() => setFontSize((current) => Math.max(10, current - 1))}
+                      style={{
+                        background: 'var(--button-bg)',
+                        border: '1px solid var(--line)',
+                        borderRadius: '4px',
+                        width: '28px',
+                        height: '28px',
+                        cursor: 'pointer',
+                        color: 'var(--text)',
+                      }}
+                    >
+                      A-
+                    </button>
+                    <span
+                      style={{
+                        fontSize: '12px',
+                        color: 'var(--text-soft)',
+                        width: '24px',
+                        textAlign: 'center',
+                      }}
+                    >
+                      {fontSize}
+                    </span>
+                    <button
+                      onClick={() => setFontSize((current) => Math.min(24, current + 1))}
+                      style={{
+                        background: 'var(--button-bg)',
+                        border: '1px solid var(--line)',
+                        borderRadius: '4px',
+                        width: '28px',
+                        height: '28px',
+                        cursor: 'pointer',
+                        color: 'var(--text)',
+                      }}
+                    >
+                      A+
+                    </button>
+                    {detailMode === 'edit' ? (
+                      <button
+                        onClick={() => setShowPreview(!showPreview)}
+                        style={{
+                          marginLeft: '4px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          background: showPreview ? 'var(--canvas-hover)' : 'var(--button-bg)',
+                          border: '1px solid var(--line)',
+                          borderRadius: '4px',
+                          width: '28px',
+                          height: '28px',
+                          cursor: 'pointer',
+                          color: showPreview ? 'var(--accent)' : 'var(--text-soft)',
+                        }}
+                        title={showPreview ? '关闭实时预览' : '开启侧边实时预览'}
+                      >
+                        <PanelRight size={15} />
+                      </button>
+                    ) : null}
+                    <button
+                      disabled={!hasUnsavedChanges || busyAction === 'save'}
+                      onClick={() => void handleSave()}
+                      style={{
+                        marginLeft: '8px',
+                        padding: '0 12px',
+                        height: '28px',
+                        fontSize: '12px',
+                        fontWeight: 500,
+                        background:
+                          !hasUnsavedChanges || busyAction === 'save'
+                            ? 'var(--button-bg)'
+                            : 'var(--accent)',
+                        color:
+                          !hasUnsavedChanges || busyAction === 'save'
+                            ? 'var(--text-soft)'
+                            : 'white',
+                        border: '1px solid var(--line)',
+                        borderRadius: '4px',
+                        cursor:
+                          !hasUnsavedChanges || busyAction === 'save'
+                            ? 'not-allowed'
+                            : 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                      }}
+                    >
+                      <Save size={14} />
+                      {busyAction === 'save' ? '保存中...' : '保存修改'}
+                    </button>
+                  </div>
+                </div>
+
+                <div style={{ flex: 1, overflow: 'auto', fontSize: `${fontSize}px` }}>
+                  <div
+                    className="detail-surface"
+                    style={{
+                      minHeight: '100%',
+                      border: 'none',
+                      borderRadius: 0,
+                      overflow: 'visible',
+                      margin: 0,
+                      fontSize: '1em',
+                    }}
+                  >
+                    {detailMode === 'preview' ? (
+                      <article className="document-surface markdown-surface" style={{ fontSize: '1em' }}>
+                        <div className="document-frontmatter">
+                          {previewSource.frontmatter.slice(0, 10).map((entry) => (
+                            <span
+                              className="frontmatter-chip"
+                              key={entry.key}
+                              style={{ fontSize: '0.85em' }}
+                            >
+                              {entry.key}: {entry.value}
+                            </span>
+                          ))}
+                        </div>
+
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {previewSource.body || '这份 skill 目前没有正文内容。'}
+                        </ReactMarkdown>
+                      </article>
+                    ) : null}
+
+                    {detailMode === 'source' ? (
+                      <pre className="document-surface source-surface" style={{ fontSize: '1em' }}>
+                        {selectedSkill.rawContent}
+                      </pre>
+                    ) : null}
+
+                    {detailMode === 'edit' ? (
+                      <div className="editor-shell" style={{ fontSize: '1em' }}>
+                        <div className="editor-panel">
+                          <div className="editor-panel-head">
+                            <span>Markdown Source</span>
+                            <strong>{hasUnsavedChanges ? '未保存改动' : '与磁盘同步'}</strong>
+                          </div>
+                          <textarea
+                            className="skill-editor"
+                            onChange={(event) => {
+                              if (!selectedSkill) {
+                                return
+                              }
+                              const nextRaw = event.target.value
+                              setDrafts((current) => ({
+                                ...current,
+                                [selectedSkill.id]: nextRaw,
+                              }))
+                            }}
+                            spellCheck={false}
+                            value={draftContent}
+                            style={{ fontSize: '1em' }}
+                          />
+                        </div>
+
+                        {showPreview ? (
+                          <div className="editor-panel" style={{ background: 'var(--main-bg)' }}>
+                            <div className="editor-panel-head">
+                              <span>Live Preview</span>
+                              <strong>{draftPreviewSource.frontmatter.length} 项 frontmatter</strong>
+                            </div>
+                            <article
+                              className="document-surface markdown-surface is-editor-preview"
+                              style={{ fontSize: '1em', height: '100%', overflowY: 'auto' }}
+                            >
+                              <div className="document-frontmatter">
+                                {draftPreviewSource.frontmatter.slice(0, 10).map((entry) => (
+                                  <span
+                                    className="frontmatter-chip"
+                                    key={entry.key}
+                                    style={{ fontSize: '0.85em' }}
+                                  >
+                                    {entry.key}: {entry.value}
+                                  </span>
+                                ))}
+                              </div>
+                              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                {draftPreviewSource.body || '这份 skill 目前没有正文内容。'}
+                              </ReactMarkdown>
+                            </article>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+
+                <div
+                  className="detail-statusbar"
+                  style={{
+                    borderTop: '1px solid var(--line)',
+                    padding: '12px 20px',
+                    background: 'var(--panel-bg)',
+                  }}
+                >
+                  <div className="statusbar-note">
+                    <ShieldCheck size={14} />
+                    <span>{hasUnsavedChanges ? '有未保存改动' : '内容已同步到本地文件'}</span>
+                  </div>
+                  <div className="statusbar-actions">
+                    <span className="shortcut-hint">Cmd/Ctrl + S 保存</span>
+                  </div>
+                </div>
+              </div>
+            )
+          ) : (
             <>
               <div className="pane-header">
                 <div className="pane-header-copy">
-                  <span className="pane-kicker">Skill Library</span>
-                  <h1>{selectedSourceTitle}</h1>
-                  <p>{selectedSourceSubtitle}</p>
+                  <span className="pane-kicker">Marketplace</span>
+                  <h1>{selectedMarketTitle}</h1>
+                  <p>{selectedMarketSubtitle}</p>
+                  <div className="pane-header-meta">
+                    {selectedMarketRegistry ? (
+                      <>
+                        <span className={`registry-badge registry-${selectedMarketRegistry.status}`}>
+                          {getRegistryStatusLabel(selectedMarketRegistry.status)}
+                        </span>
+                        <span className="pane-meta-pill">已加载 {selectedMarketRegistryLoadedCount}</span>
+                        <span className="pane-meta-pill">
+                          {selectedMarketRegistry.system ? '系统源' : '自定义源'}
+                        </span>
+                        {isExternalUrl(selectedMarketRegistry.manifestUrl) ? (
+                          <button
+                            className="pane-meta-pill pane-meta-link pane-meta-url"
+                            onClick={() => {
+                              void handleOpenExternal(selectedMarketRegistry.manifestUrl)
+                            }}
+                            title={`在浏览器打开 ${selectedMarketRegistry.manifestUrl}`}
+                            type="button"
+                          >
+                            {selectedMarketRegistry.manifestUrl}
+                          </button>
+                        ) : (
+                          <span
+                            className="pane-meta-pill pane-meta-url"
+                            title={selectedMarketRegistry.manifestUrl}
+                          >
+                            {selectedMarketRegistry.manifestUrl}
+                          </span>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        <span className="pane-meta-pill">
+                          {marketRegistries.length} 个 registry
+                        </span>
+                        <span className="pane-meta-pill">
+                          远端可用 {remoteReadyRegistryCount}
+                        </span>
+                        <span className="pane-meta-pill">
+                          已加载 {visibleMarketSkills.length}
+                        </span>
+                      </>
+                    )}
+                  </div>
                 </div>
 
-                <div className="pane-metrics">
-                  <div className="metric-card">
-                    <span>可见</span>
-                    <strong>{visibleSkills.length}</strong>
-                  </div>
-                  <div className="metric-card">
-                    <span>启用</span>
-                    <strong>{visibleEnabledCount}</strong>
-                  </div>
-                  <div className="metric-card">
-                    <span>停用</span>
-                    <strong>{visibleDisabledCount}</strong>
+                <div className="pane-header-actions">
+                  <button
+                    className="chrome-button"
+                    onClick={() => setIsAddRegistryDialogOpen(true)}
+                    type="button"
+                  >
+                    <FolderPlus size={15} />
+                    Add Registry
+                  </button>
+
+                  <div className="pane-metrics">
+                    <div className="metric-card">
+                      <span>已加载</span>
+                      <strong>{visibleMarketSkills.length}</strong>
+                    </div>
+                    <div className="metric-card">
+                      <span>已装</span>
+                      <strong>{visibleInstalledMarketCount}</strong>
+                    </div>
+                    <div className="metric-card">
+                      <span>远端源</span>
+                      <strong>{remoteReadyRegistryCount}</strong>
+                    </div>
                   </div>
                 </div>
               </div>
 
-              {errorMessage ? <div className="banner error-banner">{errorMessage}</div> : null}
+              {selectedMarketRegistry?.status === 'error' && selectedMarketRegistry.error ? (
+                <div className="banner error-banner">{selectedMarketRegistry.error}</div>
+              ) : null}
 
               <div className="table-shell">
-                <div className="table-body">
-                  {!snapshot ? (
+                <div className="table-body market-table-body">
+                  {!marketSnapshot ? (
                     <EmptyState
-                      description="首次扫描会读取你接入的目录，并提取 frontmatter、描述和时间信息。"
-                      title="正在载入本地 skill"
+                      description="正在加载 registry 清单，稍后就会展示可安装的 skills。"
+                      title="正在连接 Market"
                     />
-                  ) : visibleSkills.length === 0 ? (
+                  ) : visibleMarketSkills.length === 0 ? (
                     <EmptyState
-                      description="试试切换来源、清空搜索，或者添加一个包含 `SKILL.md` 的目录。"
-                      title="没有匹配结果"
+                      description="当前筛选下还没有可展示的 Market skill。你可以切换 registry、恢复启用，或添加一个新的 manifest。"
+                      title="没有匹配的 Market Skill"
                     />
                   ) : (
-                    visibleSkills.map((skill) => (
-                      <SkillCard
-                        active={selectedSkillId === skill.id}
+                    visibleMarketSkills.map((skill) => (
+                      <MarketCard
+                        active={selectedMarketSkillId === skill.id}
+                        installed={installedSkillNameSet.has(skill.name.trim().toLowerCase())}
+                        installing={marketInstallId === skill.id}
                         key={skill.id}
                         onClick={() => {
-                          setSelectedSkillId(skill.id)
+                          setSelectedMarketSkillId(skill.id)
                         }}
-                        onDoubleClick={() => {
-                          setSelectedSkillId(skill.id)
-                          setViewMode('skill')
-                        }}
-                        onContextMenu={(x, y) => {
-                          setContextMenu({ x, y, skillId: skill.id })
+                        onInstall={() => {
+                          void handleInstallMarketSkill(skill)
                         }}
                         skill={skill}
                       />
                     ))
                   )}
                 </div>
+
+                {visibleMarketSkills.length > 0 ? (
+                  <div className="market-loadmore-strip">
+                    <span className="market-loadmore-note">
+                      已加载 {visibleMarketSkills.length} 条
+                      {marketHasMore ? '，可继续获取更多结果' : '，当前已到达本轮结果末尾'}
+                    </span>
+
+                    {marketHasMore ? (
+                      <button
+                        className="chrome-button"
+                        disabled={marketBusyAction === 'load-more'}
+                        onClick={() => {
+                          void loadMoreMarketSkills()
+                        }}
+                        type="button"
+                      >
+                        <RefreshCw
+                          className={marketBusyAction === 'load-more' ? 'is-spinning' : ''}
+                          size={15}
+                        />
+                        {marketBusyAction === 'load-more' ? '加载中...' : '加载更多'}
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             </>
-          ) : !selectedSkill ? (
-            <EmptyState description="此模式下需要选中一个Skill" title="无内容" />
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--main-bg)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 20px', borderBottom: '1px solid var(--line)' }}>
-                <button
-                  onClick={() => {
-                    if (hasUnsavedChanges) {
-                      if (window.confirm('有未保存内容，是否丢弃？')) {
-                        setDrafts((prev) => {
-                          const next = { ...prev }
-                          if (selectedSkill) delete next[selectedSkill.id]
-                          return next
-                        })
-                        setViewMode('grid')
-                      }
-                    } else {
-                      setViewMode('grid')
-                    }
-                  }}
-                  style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-soft)', padding: '6px 0', fontSize: '13px', fontWeight: 500 }}
-                >
-                  <ArrowLeft size={16} /> 返回列表
-                </button>
-
-                <div className="mode-switch" style={{ margin: 0, padding: 0, border: 'none', background: 'var(--button-bg)' }}>
-                  {[
-                    { icon: Eye, id: 'preview', label: '预览' },
-                    { icon: FileCode2, id: 'source', label: '原文' },
-                    { icon: PencilLine, id: 'edit', label: '编辑' },
-                  ].map((item) => (
-                    <button
-                      className={detailMode === item.id ? 'is-active' : ''}
-                      key={item.id}
-                      onClick={() => setDetailMode(item.id as DetailMode)}
-                      type="button"
-                    >
-                      <item.icon size={15} />
-                      {item.label}
-                    </button>
-                  ))}
-                </div>
-
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <button onClick={() => setFontSize(f => Math.max(10, f - 1))} style={{ background: 'var(--button-bg)', border: '1px solid var(--line)', borderRadius: '4px', width: '28px', height: '28px', cursor: 'pointer', color: 'var(--text)' }}>A-</button>
-                  <span style={{ fontSize: '12px', color: 'var(--text-soft)', width: '24px', textAlign: 'center' }}>{fontSize}</span>
-                  <button onClick={() => setFontSize(f => Math.min(24, f + 1))} style={{ background: 'var(--button-bg)', border: '1px solid var(--line)', borderRadius: '4px', width: '28px', height: '28px', cursor: 'pointer', color: 'var(--text)' }}>A+</button>
-                  {detailMode === 'edit' && (
-                    <button
-                      onClick={() => setShowPreview(!showPreview)}
-                      style={{ marginLeft: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center', background: showPreview ? 'var(--canvas-hover)' : 'var(--button-bg)', border: '1px solid var(--line)', borderRadius: '4px', width: '28px', height: '28px', cursor: 'pointer', color: showPreview ? 'var(--accent)' : 'var(--text-soft)' }}
-                      title={showPreview ? "关闭实时预览" : "开启侧边实时预览"}
-                    >
-                      <PanelRight size={15} />
-                    </button>
-                  )}
-                  <button
-                    disabled={!hasUnsavedChanges || busyAction === 'save'}
-                    onClick={() => void handleSave()}
-                    style={{
-                      marginLeft: '8px', padding: '0 12px', height: '28px', fontSize: '12px', fontWeight: 500,
-                      background: (!hasUnsavedChanges || busyAction === 'save') ? 'var(--button-bg)' : 'var(--accent)',
-                      color: (!hasUnsavedChanges || busyAction === 'save') ? 'var(--text-soft)' : 'white',
-                      border: '1px solid var(--line)', borderRadius: '4px',
-                      cursor: (!hasUnsavedChanges || busyAction === 'save') ? 'not-allowed' : 'pointer',
-                      display: 'flex', alignItems: 'center', gap: '6px'
-                    }}
-                  >
-                    <Save size={14} />
-                    {busyAction === 'save' ? '保存中...' : '保存修改'}
-                  </button>
-                </div>
-              </div>
-
-              <div style={{ flex: 1, overflow: 'auto', fontSize: `${fontSize}px` }}>
-                <div className="detail-surface" style={{ minHeight: '100%', border: 'none', borderRadius: 0, overflow: 'visible', margin: 0, fontSize: '1em' }}>
-                  {detailMode === 'preview' ? (
-                    <article className="document-surface markdown-surface" style={{ fontSize: '1em' }}>
-                      <div className="document-frontmatter">
-                        {previewSource.frontmatter.slice(0, 10).map((entry) => (
-                          <span className="frontmatter-chip" key={entry.key} style={{ fontSize: '0.85em' }}>
-                            {entry.key}: {entry.value}
-                          </span>
-                        ))}
-                      </div>
-
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {previewSource.body || '这份 skill 目前没有正文内容。'}
-                      </ReactMarkdown>
-                    </article>
-                  ) : null}
-
-                  {detailMode === 'source' ? (
-                    <pre className="document-surface source-surface" style={{ fontSize: '1em' }}>{selectedSkill.rawContent}</pre>
-                  ) : null}
-
-                  {detailMode === 'edit' ? (
-                    <div className="editor-shell" style={{ fontSize: '1em' }}>
-                      <div className="editor-panel">
-                        <div className="editor-panel-head">
-                          <span>Markdown Source</span>
-                          <strong>{hasUnsavedChanges ? '未保存改动' : '与磁盘同步'}</strong>
-                        </div>
-                        <textarea
-                          className="skill-editor"
-                          onChange={(event) => {
-                            if (!selectedSkill) return
-                            const nextRaw = event.target.value
-                            setDrafts((current) => ({
-                              ...current,
-                              [selectedSkill.id]: nextRaw,
-                            }))
-                          }}
-                          spellCheck={false}
-                          value={draftContent}
-                          style={{ fontSize: '1em' }}
-                        />
-                      </div>
-
-                      {showPreview && (
-                        <div className="editor-panel" style={{ background: 'var(--main-bg)' }}>
-                          <div className="editor-panel-head">
-                            <span>Live Preview</span>
-                            <strong>{draftPreviewSource.frontmatter.length} 项 frontmatter</strong>
-                          </div>
-                          <article className="document-surface markdown-surface is-editor-preview" style={{ fontSize: '1em', height: '100%', overflowY: 'auto' }}>
-                            <div className="document-frontmatter">
-                              {draftPreviewSource.frontmatter.slice(0, 10).map((entry) => (
-                                <span className="frontmatter-chip" key={entry.key} style={{ fontSize: '0.85em' }}>
-                                  {entry.key}: {entry.value}
-                                </span>
-                              ))}
-                            </div>
-                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                              {draftPreviewSource.body || '这份 skill 目前没有正文内容。'}
-                            </ReactMarkdown>
-                          </article>
-                        </div>
-                      )}
-                    </div>
-                  ) : null}
-                </div>
-              </div>
-
-              <div className="detail-statusbar" style={{ borderTop: '1px solid var(--line)', padding: '12px 20px', background: 'var(--panel-bg)' }}>
-                <div className="statusbar-note">
-                  <ShieldCheck size={14} />
-                  <span>{hasUnsavedChanges ? '有未保存改动' : '内容已同步到本地文件'}</span>
-                </div>
-                <div className="statusbar-actions">
-                  <span className="shortcut-hint">Cmd/Ctrl + S 保存</span>
-                </div>
-              </div>
-            </div>
           )}
         </main>
 
         <section className="detail-pane">
-          {!selectedSkill ? (
-            <EmptyState
-              description="选择一个 skill 后，这里会进入阅读、编辑和启停操作工作台。"
-              title="右侧详情面板"
-            />
+          {activeTab === 'library' ? (
+            !selectedSkill ? (
+              <EmptyState
+                description="选择一个 skill 后，这里会进入阅读、编辑和启停操作工作台。"
+                title="右侧详情面板"
+              />
+            ) : (
+              <>
+                <div className="detail-header">
+                  <div className="detail-header-copy">
+                    <span className="pane-kicker">Inspector</span>
+                    <h2>{selectedSkill.name}</h2>
+                    <p>{selectedSkill.description}</p>
+                  </div>
+
+                  <div className="detail-actions">
+                    <button
+                      className="detail-button"
+                      onClick={() => {
+                        void handleReveal()
+                      }}
+                      type="button"
+                    >
+                      <FolderSearch2 size={15} />
+                      Finder
+                    </button>
+
+                    <button
+                      className={`detail-button ${selectedSkill.enabled ? 'is-danger' : ''}`}
+                      onClick={() => {
+                        void handleToggle()
+                      }}
+                      type="button"
+                    >
+                      <CircleOff size={15} />
+                      {selectedSkill.enabled ? '停用' : '启用'}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="detail-properties">
+                  <div className="detail-prop-row">
+                    <div className="detail-prop-label">状态</div>
+                    <div className="detail-prop-value">
+                      <span
+                        className={`status-pill ${selectedSkill.enabled ? 'is-enabled' : 'is-disabled'}`}
+                      >
+                        {selectedSkill.enabled ? '已启用' : '已停用'}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="detail-prop-row">
+                    <div className="detail-prop-label">来源</div>
+                    <div className="detail-prop-value">{selectedSkill.sourceLabel}</div>
+                  </div>
+                  <div className="detail-prop-row">
+                    <div className="detail-prop-label">路径</div>
+                    <div className="detail-prop-value">
+                      <span className="context-chip">
+                        {selectedSkill.relativePath === '.' ? '' : `${selectedSkill.relativePath}/`}
+                        {selectedSkill.fileName}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="detail-prop-row">
+                    <div className="detail-prop-label">添加时间</div>
+                    <div className="detail-prop-value">{formatDate(selectedSkill.addedAt)}</div>
+                  </div>
+                  <div className="detail-prop-row">
+                    <div className="detail-prop-label">更新时间</div>
+                    <div className="detail-prop-value">{formatDate(selectedSkill.updatedAt)}</div>
+                  </div>
+                  <div className="detail-prop-row">
+                    <div className="detail-prop-label">Frontmatter</div>
+                    <div className="detail-prop-value">{selectedSkill.frontmatter.length} 项</div>
+                  </div>
+                </div>
+              </>
+            )
           ) : (
             <>
               <div className="detail-header">
                 <div className="detail-header-copy">
-                  <span className="pane-kicker">Inspector</span>
-                  <h2>{selectedSkill.name}</h2>
-                  <p>{selectedSkill.description}</p>
+                  <span className="pane-kicker">Market Inspector</span>
+                  <h2>
+                    {selectedMarketSkill?.name ??
+                      selectedMarketRegistry?.label ??
+                      'Market Overview'}
+                  </h2>
+                  <p>
+                    {selectedMarketSkill?.description ??
+                      (selectedMarketRegistry
+                        ? '查看当前 registry 的状态、清单链接和已加载结果。'
+                        : null) ??
+                      '从多个 registry 聚合检索技能，并直接安装到统一的全局库。'}
+                  </p>
                 </div>
 
-                <div className="detail-actions">
-                  <button
-                    className="detail-button"
-                    onClick={() => {
-                      void handleReveal()
-                    }}
-                    type="button"
-                  >
-                    <FolderSearch2 size={15} />
-                    Finder
-                  </button>
-
-                  <button
-                    className={`detail-button ${selectedSkill.enabled ? 'is-danger' : ''}`}
-                    onClick={() => {
-                      void handleToggle()
-                    }}
-                    type="button"
-                  >
-                    <CircleOff size={15} />
-                    {selectedSkill.enabled ? '停用' : '启用'}
-                  </button>
-                </div>
+                {selectedMarketSkill ? (
+                  <div className="detail-actions">
+                    <button
+                      className="detail-button"
+                      disabled={selectedMarketSkillInstalled || marketInstallId === selectedMarketSkill.id}
+                      onClick={() => {
+                        void handleInstallMarketSkill(selectedMarketSkill)
+                      }}
+                      type="button"
+                    >
+                      <Download size={15} />
+                      {selectedMarketSkillInstalled
+                        ? '已安装'
+                        : marketInstallId === selectedMarketSkill.id
+                          ? '安装中...'
+                          : '安装到全局库'}
+                    </button>
+                  </div>
+                ) : null}
               </div>
 
               <div className="detail-properties">
-                <div className="detail-prop-row">
-                  <div className="detail-prop-label">状态</div>
-                  <div className="detail-prop-value">
-                    <span className={`status-pill ${selectedSkill.enabled ? 'is-enabled' : 'is-disabled'}`}>
-                      {selectedSkill.enabled ? '已启用' : '已停用'}
-                    </span>
-                  </div>
-                </div>
-                <div className="detail-prop-row">
-                  <div className="detail-prop-label">来源</div>
-                  <div className="detail-prop-value">{selectedSkill.sourceLabel}</div>
-                </div>
-                <div className="detail-prop-row">
-                  <div className="detail-prop-label">路径</div>
-                  <div className="detail-prop-value">
-                    <span className="context-chip">
-                      {selectedSkill.relativePath === '.' ? '' : `${selectedSkill.relativePath}/`}
-                      {selectedSkill.fileName}
-                    </span>
-                  </div>
-                </div>
-                <div className="detail-prop-row">
-                  <div className="detail-prop-label">添加时间</div>
-                  <div className="detail-prop-value">{formatDate(selectedSkill.addedAt)}</div>
-                </div>
-                <div className="detail-prop-row">
-                  <div className="detail-prop-label">更新时间</div>
-                  <div className="detail-prop-value">{formatDate(selectedSkill.updatedAt)}</div>
-                </div>
-                <div className="detail-prop-row">
-                  <div className="detail-prop-label">Frontmatter</div>
-                  <div className="detail-prop-value">{selectedSkill.frontmatter.length} 项</div>
-                </div>
+                {selectedMarketSkill ? (
+                  <>
+                    <div className="detail-prop-row">
+                      <div className="detail-prop-label">状态</div>
+                      <div className="detail-prop-value">
+                        <span
+                          className={`status-pill ${
+                            selectedMarketSkillInstalled ? 'is-enabled' : 'is-disabled'
+                          }`}
+                        >
+                          {selectedMarketSkillInstalled ? '已安装' : '未安装'}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="detail-prop-row">
+                      <div className="detail-prop-label">版本</div>
+                      <div className="detail-prop-value">v{selectedMarketSkill.version}</div>
+                    </div>
+                    <div className="detail-prop-row">
+                      <div className="detail-prop-label">作者</div>
+                      <div className="detail-prop-value">{selectedMarketSkill.author}</div>
+                    </div>
+                    <div className="detail-prop-row">
+                      <div className="detail-prop-label">来源</div>
+                      <div className="detail-prop-value">{selectedMarketSkill.registryLabel}</div>
+                    </div>
+                    <div className="detail-prop-row">
+                      <div className="detail-prop-label">标签</div>
+                      <div className="detail-prop-value">
+                        {selectedMarketSkill.tags.length > 0 ? (
+                          selectedMarketSkill.tags.map((tag) => (
+                            <span className="market-tag" key={tag}>
+                              {tag}
+                            </span>
+                          ))
+                        ) : (
+                          <span className="detail-section-note">暂无标签</span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="detail-prop-row">
+                      <div className="detail-prop-label">下载源</div>
+                      <div className="detail-prop-value">
+                        {isExternalUrl(selectedMarketSkill.downloadUrl) ? (
+                          <button
+                            className="inline-link market-path"
+                            onClick={() => {
+                              void handleOpenExternal(selectedMarketSkill.downloadUrl)
+                            }}
+                            title={`在浏览器打开 ${selectedMarketSkill.downloadUrl}`}
+                            type="button"
+                          >
+                            {selectedMarketSkill.downloadUrl}
+                          </button>
+                        ) : (
+                          <span className="market-path">{selectedMarketSkill.downloadUrl}</span>
+                        )}
+                      </div>
+                    </div>
+                    {selectedMarketSkill.homepageUrl ? (
+                      <div className="detail-prop-row">
+                        <div className="detail-prop-label">主页</div>
+                        <div className="detail-prop-value">
+                          {isExternalUrl(selectedMarketSkill.homepageUrl) ? (
+                            <button
+                              className="inline-link market-path"
+                              onClick={() => {
+                                void handleOpenExternal(selectedMarketSkill.homepageUrl as string)
+                              }}
+                              title={`在浏览器打开 ${selectedMarketSkill.homepageUrl}`}
+                              type="button"
+                            >
+                              {selectedMarketSkill.homepageUrl}
+                            </button>
+                          ) : (
+                            <span className="market-path">{selectedMarketSkill.homepageUrl}</span>
+                          )}
+                        </div>
+                      </div>
+                    ) : null}
+                    <div className="detail-prop-row">
+                      <div className="detail-prop-label">安装位置</div>
+                      <div className="detail-prop-value">
+                        <span className="context-chip">
+                          {marketSnapshot?.installBaseDir ?? '~/.Agents/skills'}/{selectedMarketSkill.slug}
+                        </span>
+                      </div>
+                    </div>
+                  </>
+                ) : selectedMarketRegistry ? (
+                  <>
+                    <div className="detail-prop-row">
+                      <div className="detail-prop-label">状态</div>
+                      <div className="detail-prop-value">
+                        <span className={`registry-badge registry-${selectedMarketRegistry.status}`}>
+                          {getRegistryStatusLabel(selectedMarketRegistry.status)}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="detail-prop-row">
+                      <div className="detail-prop-label">已加载</div>
+                      <div className="detail-prop-value">
+                        {marketSkillCounts.get(selectedMarketRegistry.id) ?? 0}
+                      </div>
+                    </div>
+                    <div className="detail-prop-row">
+                      <div className="detail-prop-label">Manifest</div>
+                      <div className="detail-prop-value">
+                        {isExternalUrl(selectedMarketRegistry.manifestUrl) ? (
+                          <button
+                            className="inline-link market-path"
+                            onClick={() => {
+                              void handleOpenExternal(selectedMarketRegistry.manifestUrl)
+                            }}
+                            title={`在浏览器打开 ${selectedMarketRegistry.manifestUrl}`}
+                            type="button"
+                          >
+                            {selectedMarketRegistry.manifestUrl}
+                          </button>
+                        ) : (
+                          <span className="market-path">{selectedMarketRegistry.manifestUrl}</span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="detail-prop-row">
+                      <div className="detail-prop-label">安装位置</div>
+                      <div className="detail-prop-value">
+                        <span className="context-chip">
+                          {marketSnapshot?.installBaseDir ?? '~/.Agents/skills'}
+                        </span>
+                      </div>
+                    </div>
+                    {selectedMarketRegistry.error ? (
+                      <div className="detail-prop-row">
+                        <div className="detail-prop-label">错误</div>
+                        <div className="detail-prop-value registry-error-text">
+                          {selectedMarketRegistry.error}
+                        </div>
+                      </div>
+                    ) : null}
+                  </>
+                ) : (
+                  <>
+                    <div className="detail-prop-row">
+                      <div className="detail-prop-label">Registry</div>
+                      <div className="detail-prop-value">{marketRegistries.length}</div>
+                    </div>
+                    <div className="detail-prop-row">
+                      <div className="detail-prop-label">远端</div>
+                      <div className="detail-prop-value">{remoteReadyRegistryCount}</div>
+                    </div>
+                    <div className="detail-prop-row">
+                      <div className="detail-prop-label">安装位置</div>
+                      <div className="detail-prop-value">
+                        <span className="context-chip">
+                          {marketSnapshot?.installBaseDir ?? '~/.Agents/skills'}
+                        </span>
+                      </div>
+                    </div>
+                  </>
+                )}
               </div>
+
             </>
           )}
         </section>
       </div>
 
       <footer className="status-strip">
-        <div className="status-strip-item">
-          <Folders size={14} />
-          <span>{snapshot?.sources.length ?? 0} 个来源</span>
-        </div>
-        <div className="status-strip-item">
-          <ShieldCheck size={14} />
-          <span>{skills.filter((skill) => skill.enabled && !skill.systemDisabled).length} 个已启用 skill</span>
-        </div>
-        <div className="status-strip-item">
-          <span>最近刷新 {snapshot ? formatDate(snapshot.lastRefreshedAt) : '--'}</span>
-        </div>
+        {activeTab === 'library' ? (
+          <>
+            <div className="status-strip-item">
+              <Folders size={14} />
+              <span>{snapshot?.sources.length ?? 0} 个来源</span>
+            </div>
+            <div className="status-strip-item">
+              <ShieldCheck size={14} />
+              <span>{skills.filter((skill) => skill.enabled && !skill.systemDisabled).length} 个已启用 skill</span>
+            </div>
+            <div className="status-strip-item">
+              <span>最近刷新 {snapshot ? formatDate(snapshot.lastRefreshedAt) : '--'}</span>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="status-strip-item">
+              <Store size={14} />
+              <span>
+                远端源 {remoteReadyRegistryCount} 个，全部 registry {readyRegistryCount}/{marketRegistries.length || 0}
+              </span>
+            </div>
+            <div className="status-strip-item">
+              <Download size={14} />
+              <span>
+                已加载 {visibleMarketSkills.length} 条，已安装 {visibleInstalledMarketCount} 条
+              </span>
+            </div>
+            <div className="status-strip-item">
+              <span>{marketSnapshot?.installBaseDir ?? '~/.Agents/skills'}</span>
+            </div>
+          </>
+        )}
       </footer>
+
+      {isAddRegistryDialogOpen ? (
+        <div
+          className="modal-backdrop"
+          onClick={() => setIsAddRegistryDialogOpen(false)}
+          role="presentation"
+        >
+          <div
+            aria-labelledby="add-registry-title"
+            aria-modal="true"
+            className="modal-card"
+            onClick={(event) => event.stopPropagation()}
+            role="dialog"
+          >
+            <div className="modal-head">
+              <div className="modal-head-copy">
+                <h2 id="add-registry-title">Add Registry</h2>
+                <p>支持本地 manifest、Claude Plugins API、SkillsLLM API 等真实数据源。</p>
+              </div>
+
+              <button
+                className="source-remove modal-close"
+                onClick={() => setIsAddRegistryDialogOpen(false)}
+                type="button"
+              >
+                <X size={15} />
+              </button>
+            </div>
+
+            <div className="modal-body">
+              <label className="modal-field">
+                <span>显示名称</span>
+                <input
+                  className="market-input"
+                  onChange={(event) => setNewRegistryLabel(event.target.value)}
+                  placeholder="可选，例如 Claude Plugins"
+                  value={newRegistryLabel}
+                />
+              </label>
+
+              <label className="modal-field">
+                <span>Manifest / API URL</span>
+                <input
+                  autoFocus
+                  className="market-input"
+                  onChange={(event) => setNewRegistryUrl(event.target.value)}
+                  placeholder="例如 https://claude-plugins.dev/api/skills?limit=50"
+                  value={newRegistryUrl}
+                />
+              </label>
+
+              <div className="modal-note">
+                <span>可直接添加：</span>
+                <code>https://claude-plugins.dev/api/skills?limit=50</code>
+                <code>https://skillsllm.com/api/skills?limit=50</code>
+              </div>
+            </div>
+
+            <div className="modal-foot">
+              <button
+                className="chrome-button"
+                onClick={() => setIsAddRegistryDialogOpen(false)}
+                type="button"
+              >
+                取消
+              </button>
+              <button
+                className="chrome-button is-primary"
+                disabled={!newRegistryUrl.trim() || marketBusyAction === 'registry'}
+                onClick={() => {
+                  void handleAddMarketRegistry()
+                }}
+                type="button"
+              >
+                <FolderPlus size={15} />
+                {marketBusyAction === 'registry' ? '添加中...' : '添加 Registry'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <ToastStack toasts={toasts} />
 

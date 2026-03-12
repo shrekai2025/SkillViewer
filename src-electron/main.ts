@@ -1,6 +1,14 @@
 import { app, BrowserWindow, ipcMain, shell, screen } from 'electron'
 import path from 'node:path'
 
+import {
+  addMarketRegistry,
+  browseMarketSkills,
+  getMarketSnapshot,
+  installMarketSkill,
+  removeMarketRegistry,
+  toggleMarketRegistry,
+} from './market-service'
 import { addSourceFromDialog, getSnapshot, removeSource, saveSkill, toggleSkill } from './skill-service'
 
 let mainWindow: BrowserWindow | null = null
@@ -59,12 +67,25 @@ function createWindow() {
 
 function registerIpc() {
   ipcMain.handle('skillviewer:add-source', async () => addSourceFromDialog(mainWindow))
+  ipcMain.handle('skillviewer:add-market-registry', async (_event, payload) => addMarketRegistry(payload))
+  ipcMain.handle('skillviewer:browse-market-skills', async (_event, payload) => browseMarketSkills(payload))
   ipcMain.handle('skillviewer:get-snapshot', async () => getSnapshot())
+  ipcMain.handle('skillviewer:get-market-snapshot', async () => getMarketSnapshot())
+  ipcMain.handle('skillviewer:install-market-skill', async (_event, payload) => installMarketSkill(payload))
+  ipcMain.handle('skillviewer:open-external', async (_event, url: string) => {
+    const parsed = new URL(url)
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      throw new Error('Only http and https URLs can be opened in the browser.')
+    }
+    await shell.openExternal(parsed.toString())
+  })
+  ipcMain.handle('skillviewer:remove-market-registry', async (_event, registryId: string) => removeMarketRegistry(registryId))
   ipcMain.handle('skillviewer:remove-source', async (_event, sourceId: string) => removeSource(sourceId))
   ipcMain.handle('skillviewer:reveal-skill', async (_event, filePath: string) => {
     await shell.showItemInFolder(filePath)
   })
   ipcMain.handle('skillviewer:save-skill', async (_event, payload) => saveSkill(payload))
+  ipcMain.handle('skillviewer:toggle-market-registry', async (_event, payload) => toggleMarketRegistry(payload))
   ipcMain.handle('skillviewer:toggle-skill', async (_event, payload) => toggleSkill(payload))
 }
 

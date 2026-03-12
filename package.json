@@ -1,7 +1,7 @@
 {
   "name": "skillviewer",
   "private": true,
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Local-first macOS skill browser for managing agent skills across multiple folders.",
   "author": "Skillviewer contributors",
   "type": "module",

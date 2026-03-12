@@ -1,6 +1,6 @@
-import { app, dialog, type BrowserWindow } from 'electron'
+import { dialog, type BrowserWindow } from 'electron'
 import { createHash } from 'node:crypto'
-import { access, mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises'
+import { access, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import path from 'node:path'
 
@@ -15,10 +15,7 @@ import type {
   SkillSource,
   ToggleSkillPayload,
 } from '../src/shared/contracts'
-
-interface PersistedState {
-  sources: SkillSource[]
-}
+import { readAppState, writeAppState } from './state-store'
 
 type SourcePreset = Omit<SkillSource, 'path'> & {
   candidates: string[]
@@ -28,7 +25,7 @@ const SKILL_FILE_NAMES = ['SKILL.md', 'SKILL.disabled.md'] as const
 
 const SOURCE_PRESETS: SourcePreset[] = [
   {
-    candidates: [path.join(homedir(), '.agents')],
+    candidates: [path.join(homedir(), '.Agents'), path.join(homedir(), '.agents')],
     id: 'preset-agents',
     kind: 'global',
     label: 'Agents Global',
@@ -73,10 +70,6 @@ const GLOB_IGNORES = [
   '**/node_modules/**',
 ]
 
-function getStatePath() {
-  return path.join(app.getPath('userData'), 'state.json')
-}
-
 function createCustomSourceId(sourcePath: string) {
   const digest = createHash('sha1').update(sourcePath).digest('hex').slice(0, 10)
   return `custom-${digest}`
@@ -95,23 +88,16 @@ async function pathExists(targetPath: string) {
   }
 }
 
-async function ensureStateDir() {
-  await mkdir(path.dirname(getStatePath()), { recursive: true })
-}
-
 async function readStateFile() {
-  try {
-    const raw = await readFile(getStatePath(), 'utf8')
-    const parsed = JSON.parse(raw) as PersistedState
-    return parsed
-  } catch {
-    return { sources: [] } satisfies PersistedState
-  }
+  return readAppState()
 }
 
-async function writeStateFile(state: PersistedState) {
-  await ensureStateDir()
-  await writeFile(getStatePath(), JSON.stringify(state, null, 2), 'utf8')
+async function writeStateFile(sources: SkillSource[]) {
+  const state = await readAppState()
+  await writeAppState({
+    ...state,
+    sources,
+  })
 }
 
 async function discoverDefaultSources() {
@@ -167,7 +153,7 @@ async function ensureSources() {
   const merged = mergeSources(state.sources, discovered)
 
   if (JSON.stringify(merged) !== JSON.stringify(state.sources)) {
-    await writeStateFile({ sources: merged })
+    await writeStateFile(merged)
   }
 
   return merged
@@ -327,14 +313,14 @@ export async function addSourceFromDialog(browserWindow: BrowserWindow | null) {
   }
 
   const current = await ensureSources()
-  await writeStateFile({ sources: mergeSources(current, [nextSource]) })
+  await writeStateFile(mergeSources(current, [nextSource]))
   return getSnapshot()
 }
 
 export async function removeSource(sourceId: string) {
   const current = await ensureSources()
   const nextSources = current.filter((source) => source.id !== sourceId || source.system)
-  await writeStateFile({ sources: nextSources })
+  await writeStateFile(nextSources)
   return getSnapshot()
 }
 

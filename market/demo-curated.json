@@ -1,0 +1,26 @@
+{
+  "skills": [
+    {
+      "id": "context-auditor",
+      "slug": "context-auditor",
+      "name": "Context Auditor",
+      "description": "检查当前上下文是否缺少前提、限制条件和依赖说明。",
+      "author": "SkillViewer Demo",
+      "version": "1.0.0",
+      "downloadUrl": "./zips/context-auditor.zip",
+      "homepageUrl": "https://example.com/skills/context-auditor",
+      "tags": ["analysis", "safety", "workflow"]
+    },
+    {
+      "id": "prompt-polisher",
+      "slug": "prompt-polisher",
+      "name": "Prompt Polisher",
+      "description": "把零散需求重写为结构化、可执行的高质量提示词。",
+      "author": "SkillViewer Demo",
+      "version": "1.2.0",
+      "downloadUrl": "./zips/prompt-polisher.zip",
+      "homepageUrl": "https://example.com/skills/prompt-polisher",
+      "tags": ["prompting", "writing"]
+    }
+  ]
+}
