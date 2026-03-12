@@ -1,0 +1,19 @@
+appId: com.skillviewer.app
+productName: SkillViewer
+asar: true
+directories:
+  output: release
+files:
+  - dist/**
+  - dist-electron/**
+  - package.json
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+    - target: zip
+dmg:
+  artifactName: '${productName}-${version}-${arch}.${ext}'
+  window:
+    width: 540
+    height: 380
