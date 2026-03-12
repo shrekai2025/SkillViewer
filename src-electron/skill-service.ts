@@ -9,6 +9,7 @@ import matter from 'gray-matter'
 
 import type {
   AppSnapshot,
+  InstalledMarketMetadata,
   SaveSkillPayload,
   SkillFrontmatterEntry,
   SkillRecord,
@@ -22,6 +23,7 @@ type SourcePreset = Omit<SkillSource, 'path'> & {
 }
 
 const SKILL_FILE_NAMES = ['SKILL.md', 'SKILL.disabled.md'] as const
+const MARKET_METADATA_FILE = '.skillviewer-market.json'
 
 const SOURCE_PRESETS: SourcePreset[] = [
   {
@@ -200,12 +202,35 @@ function getDescription(data: Record<string, unknown>, markdownBody: string) {
   return getFallbackDescription(markdownBody)
 }
 
-async function buildSkillRecord(source: SkillSource, filePath: string) {
+async function readInstalledMarketMetadata(directoryPath: string) {
+  try {
+    const raw = await readFile(path.join(directoryPath, MARKET_METADATA_FILE), 'utf8')
+    const parsed = JSON.parse(raw) as InstalledMarketMetadata
+
+    if (
+      typeof parsed.skillId !== 'string' ||
+      typeof parsed.registryId !== 'string' ||
+      typeof parsed.name !== 'string' ||
+      typeof parsed.slug !== 'string' ||
+      typeof parsed.version !== 'string' ||
+      typeof parsed.downloadUrl !== 'string'
+    ) {
+      return undefined
+    }
+
+    return parsed
+  } catch {
+    return undefined
+  }
+}
+
+async function buildSkillRecord(source: SkillSource, filePath: string): Promise<SkillRecord> {
   const resolvedFilePath = normalizeSourcePath(await realpath(filePath))
   const rawContent = await readFile(resolvedFilePath, 'utf8')
   const parsed = matter(rawContent)
   const fileStats = await stat(resolvedFilePath)
   const directoryPath = path.dirname(resolvedFilePath)
+  const marketOrigin = await readInstalledMarketMetadata(directoryPath)
 
   return {
     id: resolvedFilePath,
@@ -227,6 +252,7 @@ async function buildSkillRecord(source: SkillSource, filePath: string) {
     rawContent,
     markdownBody: parsed.content,
     frontmatter: getFrontmatterEntries(parsed.data),
+    ...(marketOrigin ? { marketOrigin } : {}),
   } satisfies SkillRecord
 }
 

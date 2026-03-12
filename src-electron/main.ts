@@ -4,10 +4,12 @@ import path from 'node:path'
 import {
   addMarketRegistry,
   browseMarketSkills,
+  checkSkillUpdates,
   getMarketSnapshot,
   installMarketSkill,
   removeMarketRegistry,
   toggleMarketRegistry,
+  updateInstalledSkill,
 } from './market-service'
 import { addSourceFromDialog, getSnapshot, removeSource, saveSkill, toggleSkill } from './skill-service'
 
@@ -69,6 +71,7 @@ function registerIpc() {
   ipcMain.handle('skillviewer:add-source', async () => addSourceFromDialog(mainWindow))
   ipcMain.handle('skillviewer:add-market-registry', async (_event, payload) => addMarketRegistry(payload))
   ipcMain.handle('skillviewer:browse-market-skills', async (_event, payload) => browseMarketSkills(payload))
+  ipcMain.handle('skillviewer:check-skill-updates', async () => checkSkillUpdates())
   ipcMain.handle('skillviewer:get-snapshot', async () => getSnapshot())
   ipcMain.handle('skillviewer:get-market-snapshot', async () => getMarketSnapshot())
   ipcMain.handle('skillviewer:install-market-skill', async (_event, payload) => installMarketSkill(payload))
@@ -87,6 +90,7 @@ function registerIpc() {
   ipcMain.handle('skillviewer:save-skill', async (_event, payload) => saveSkill(payload))
   ipcMain.handle('skillviewer:toggle-market-registry', async (_event, payload) => toggleMarketRegistry(payload))
   ipcMain.handle('skillviewer:toggle-skill', async (_event, payload) => toggleSkill(payload))
+  ipcMain.handle('skillviewer:update-installed-skill', async (_event, payload) => updateInstalledSkill(payload))
 }
 
 app.whenReady().then(() => {

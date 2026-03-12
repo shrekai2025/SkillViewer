@@ -5,6 +5,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
   writeFile,
 } from 'node:fs/promises'
@@ -19,12 +20,15 @@ import type {
   AddMarketRegistryPayload,
   BrowseMarketSkillsPayload,
   BrowseMarketSkillsResult,
+  InstalledMarketMetadata,
   InstallMarketSkillPayload,
   InstallMarketSkillResult,
   MarketRegistry,
   MarketSkill,
   MarketSnapshot,
+  SkillUpdateStatus,
   ToggleMarketRegistryPayload,
+  UpdateInstalledSkillPayload,
 } from '../src/shared/contracts'
 import {
   readAppState,
@@ -78,6 +82,7 @@ const BUILT_IN_REGISTRIES: BuiltInRegistryDefinition[] = [
 ]
 
 const LEGACY_BUILT_IN_REGISTRY_IDS = new Set(['builtin-curated', 'builtin-labs'])
+const MARKET_METADATA_FILE = '.skillviewer-market.json'
 
 function createRegistryId(seed: string) {
   return `market-${createHash('sha1').update(seed).digest('hex').slice(0, 10)}`
@@ -106,6 +111,63 @@ async function pathExists(targetPath: string) {
   } catch {
     return false
   }
+}
+
+function buildInstalledMarketMetadata(
+  skill: MarketSkill,
+  overrides?: Partial<InstalledMarketMetadata>,
+) {
+  const now = new Date().toISOString()
+
+  return {
+    downloadUrl: skill.downloadUrl,
+    homepageUrl: skill.homepageUrl,
+    installedAt: overrides?.installedAt ?? now,
+    name: skill.name,
+    registryId: skill.registryId,
+    registryLabel: skill.registryLabel,
+    skillId: skill.id,
+    slug: skill.slug,
+    updatedAt: now,
+    version: skill.version,
+  } satisfies InstalledMarketMetadata
+}
+
+async function readInstalledMarketMetadata(targetDir: string) {
+  try {
+    const raw = await readFile(path.join(targetDir, MARKET_METADATA_FILE), 'utf8')
+    const parsed = JSON.parse(raw) as InstalledMarketMetadata
+
+    if (
+      typeof parsed.skillId !== 'string' ||
+      typeof parsed.registryId !== 'string' ||
+      typeof parsed.name !== 'string' ||
+      typeof parsed.slug !== 'string' ||
+      typeof parsed.version !== 'string' ||
+      typeof parsed.downloadUrl !== 'string'
+    ) {
+      return null
+    }
+
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+async function writeInstalledMarketMetadata(
+  targetDir: string,
+  skill: MarketSkill,
+  overrides?: Partial<InstalledMarketMetadata>,
+) {
+  const metadata = buildInstalledMarketMetadata(skill, overrides)
+  await writeFile(
+    path.join(targetDir, MARKET_METADATA_FILE),
+    JSON.stringify(metadata, null, 2),
+    'utf8',
+  )
+
+  return metadata
 }
 
 function isRemoteManifest(manifestUrl: string) {
@@ -345,6 +407,59 @@ function matchesMarketSkillQuery(skill: MarketSkill, normalizedQuery: string) {
     skill.downloadUrl,
     ...skill.tags,
   ].some((value) => value.toLowerCase().includes(normalizedQuery))
+}
+
+function parseVersionParts(value: string) {
+  const normalized = value.trim().replace(/^v/i, '')
+  const match = normalized.match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[.-]?(.+))?$/)
+  if (!match) {
+    return null
+  }
+
+  return {
+    major: Number(match[1] ?? '0'),
+    minor: Number(match[2] ?? '0'),
+    patch: Number(match[3] ?? '0'),
+    suffix: (match[4] ?? '').trim().toLowerCase(),
+  }
+}
+
+function compareVersionStrings(currentVersion: string, latestVersion: string) {
+  if (currentVersion === latestVersion) {
+    return 0
+  }
+
+  const currentParts = parseVersionParts(currentVersion)
+  const latestParts = parseVersionParts(latestVersion)
+
+  if (currentParts && latestParts) {
+    if (currentParts.major !== latestParts.major) {
+      return currentParts.major - latestParts.major
+    }
+    if (currentParts.minor !== latestParts.minor) {
+      return currentParts.minor - latestParts.minor
+    }
+    if (currentParts.patch !== latestParts.patch) {
+      return currentParts.patch - latestParts.patch
+    }
+
+    if (currentParts.suffix !== latestParts.suffix) {
+      if (!currentParts.suffix) {
+        return 1
+      }
+      if (!latestParts.suffix) {
+        return -1
+      }
+      return currentParts.suffix.localeCompare(latestParts.suffix)
+    }
+
+    return 0
+  }
+
+  return currentVersion.localeCompare(latestVersion, undefined, {
+    numeric: true,
+    sensitivity: 'base',
+  })
 }
 
 function parseCustomManifestSkills(
@@ -1029,16 +1144,41 @@ async function installExtractedContent(extractDir: string, targetDir: string, ex
   await cp(skillRoot, targetDir, { recursive: true })
 }
 
-export async function installMarketSkill(payload: InstallMarketSkillPayload) {
-  const skill = payload.skill
-
-  if (!skill?.downloadUrl || !skill.slug) {
-    throw new Error('Market skill payload is incomplete.')
+async function resolveInstalledSkillFilePath(targetDir: string) {
+  const enabledPath = path.join(targetDir, 'SKILL.md')
+  if (await pathExists(enabledPath)) {
+    return enabledPath
   }
 
-  const installBaseDir = getInstallBaseDir()
-  await mkdir(installBaseDir, { recursive: true })
+  const disabledPath = path.join(targetDir, 'SKILL.disabled.md')
+  if (await pathExists(disabledPath)) {
+    return disabledPath
+  }
 
+  return null
+}
+
+async function preserveDisabledState(targetDir: string, shouldDisable: boolean) {
+  if (!shouldDisable) {
+    return
+  }
+
+  const enabledPath = path.join(targetDir, 'SKILL.md')
+  const disabledPath = path.join(targetDir, 'SKILL.disabled.md')
+
+  if (await pathExists(enabledPath)) {
+    await rename(enabledPath, disabledPath)
+  }
+}
+
+async function installMarketSkillToDirectory(
+  skill: MarketSkill,
+  targetDir: string,
+  options?: {
+    installedAt?: string
+    preserveDisabled?: boolean
+  },
+) {
   const tempRoot = await mkdtemp(path.join(tmpdir(), 'skillviewer-market-'))
   const archivePath = path.join(tempRoot, `${skill.slug}.zip`)
   const extractDir = path.join(tempRoot, 'extracted')
@@ -1049,9 +1189,12 @@ export async function installMarketSkill(payload: InstallMarketSkillPayload) {
     await copyDownloadToArchive(skill.downloadUrl, archivePath)
     await extract(archivePath, { dir: extractDir })
 
-    const targetDir = path.join(installBaseDir, skill.slug)
     await rm(targetDir, { force: true, recursive: true })
     await installExtractedContent(extractDir, targetDir, skill.slug)
+    await preserveDisabledState(targetDir, options?.preserveDisabled ?? false)
+    await writeInstalledMarketMetadata(targetDir, skill, {
+      installedAt: options?.installedAt,
+    })
 
     return {
       installedPath: targetDir,
@@ -1059,4 +1202,131 @@ export async function installMarketSkill(payload: InstallMarketSkillPayload) {
   } finally {
     await rm(tempRoot, { force: true, recursive: true })
   }
+}
+
+async function findLatestSkillForMetadata(metadata: InstalledMarketMetadata) {
+  let cursor: string | null = null
+  let attempts = 0
+  const normalizedName = metadata.name.trim().toLowerCase()
+
+  while (attempts < 6) {
+    const page = await browseMarketSkills({
+      cursor,
+      limit: 24,
+      query: metadata.name,
+      registryId: metadata.registryId,
+    })
+
+    const match = page.skills.find((skill) => {
+      if (skill.id === metadata.skillId) {
+        return true
+      }
+
+      if (skill.slug === metadata.slug) {
+        return true
+      }
+
+      return skill.name.trim().toLowerCase() === normalizedName
+    })
+
+    if (match) {
+      return match
+    }
+
+    if (!page.hasMore || !page.cursor) {
+      break
+    }
+
+    cursor = page.cursor
+    attempts += 1
+  }
+
+  return null
+}
+
+export async function installMarketSkill(payload: InstallMarketSkillPayload) {
+  const skill = payload.skill
+
+  if (!skill?.downloadUrl || !skill.slug) {
+    throw new Error('Market skill payload is incomplete.')
+  }
+
+  const installBaseDir = getInstallBaseDir()
+  await mkdir(installBaseDir, { recursive: true })
+  const targetDir = path.join(installBaseDir, skill.slug)
+  const existingMetadata = await readInstalledMarketMetadata(targetDir)
+
+  return installMarketSkillToDirectory(skill, targetDir, {
+    installedAt: existingMetadata?.installedAt,
+  })
+}
+
+export async function checkSkillUpdates() {
+  const installBaseDir = getInstallBaseDir()
+  if (!(await pathExists(installBaseDir))) {
+    return [] satisfies SkillUpdateStatus[]
+  }
+
+  const metadataFiles = await fg([`**/${MARKET_METADATA_FILE}`], {
+    absolute: true,
+    cwd: installBaseDir,
+    dot: true,
+    onlyFiles: true,
+    unique: true,
+  })
+
+  const checks = await Promise.all(
+    metadataFiles.map(async (metadataFilePath) => {
+      try {
+        const targetDir = path.dirname(metadataFilePath)
+        const metadata = await readInstalledMarketMetadata(targetDir)
+        if (!metadata) {
+          return null
+        }
+
+        const filePath = await resolveInstalledSkillFilePath(targetDir)
+        if (!filePath) {
+          return null
+        }
+
+        const latestSkill = await findLatestSkillForMetadata(metadata)
+        if (!latestSkill) {
+          return null
+        }
+
+        return {
+          checkedAt: new Date().toISOString(),
+          currentVersion: metadata.version,
+          filePath,
+          latestSkill,
+          latestVersion: latestSkill.version,
+          updateAvailable: compareVersionStrings(metadata.version, latestSkill.version) < 0,
+        } satisfies SkillUpdateStatus
+      } catch {
+        return null
+      }
+    }),
+  )
+
+  return checks.filter((check): check is SkillUpdateStatus => check !== null)
+}
+
+export async function updateInstalledSkill(payload: UpdateInstalledSkillPayload) {
+  const resolvedFilePath = payload.filePath
+  const targetDir = path.dirname(resolvedFilePath)
+  const metadata = await readInstalledMarketMetadata(targetDir)
+
+  if (!metadata) {
+    throw new Error('This skill is not managed by Market.')
+  }
+
+  const latestSkill = await findLatestSkillForMetadata(metadata)
+  if (!latestSkill) {
+    throw new Error('Unable to find the latest Market version for this skill.')
+  }
+
+  return installMarketSkillToDirectory(latestSkill, targetDir, {
+    installedAt: metadata.installedAt,
+    preserveDisabled: path.basename(resolvedFilePath) === 'SKILL.disabled.md',
+  })
 }

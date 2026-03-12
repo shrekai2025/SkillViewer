@@ -17,6 +17,19 @@ export interface SkillFrontmatterEntry {
   value: string
 }
 
+export interface InstalledMarketMetadata {
+  downloadUrl: string
+  homepageUrl?: string
+  installedAt: string
+  name: string
+  registryId: string
+  registryLabel: string
+  skillId: string
+  slug: string
+  updatedAt: string
+  version: string
+}
+
 export interface SkillRecord {
   id: string
   sourceId: string
@@ -35,6 +48,7 @@ export interface SkillRecord {
   rawContent: string
   markdownBody: string
   frontmatter: SkillFrontmatterEntry[]
+  marketOrigin?: InstalledMarketMetadata
 }
 
 export interface AppSnapshot {
@@ -115,10 +129,24 @@ export interface InstallMarketSkillResult {
   installedPath: string
 }
 
+export interface SkillUpdateStatus {
+  checkedAt: string
+  currentVersion: string
+  filePath: string
+  latestSkill: MarketSkill
+  latestVersion: string
+  updateAvailable: boolean
+}
+
+export interface UpdateInstalledSkillPayload {
+  filePath: string
+}
+
 export interface SkillviewerApi {
   addSource: () => Promise<AppSnapshot>
   addMarketRegistry: (payload: AddMarketRegistryPayload) => Promise<MarketSnapshot>
   browseMarketSkills: (payload: BrowseMarketSkillsPayload) => Promise<BrowseMarketSkillsResult>
+  checkSkillUpdates: () => Promise<SkillUpdateStatus[]>
   getSnapshot: () => Promise<AppSnapshot>
   getMarketSnapshot: () => Promise<MarketSnapshot>
   installMarketSkill: (payload: InstallMarketSkillPayload) => Promise<InstallMarketSkillResult>
@@ -129,4 +157,5 @@ export interface SkillviewerApi {
   saveSkill: (payload: SaveSkillPayload) => Promise<SkillRecord>
   toggleMarketRegistry: (payload: ToggleMarketRegistryPayload) => Promise<MarketSnapshot>
   toggleSkill: (payload: ToggleSkillPayload) => Promise<SkillRecord>
+  updateInstalledSkill: (payload: UpdateInstalledSkillPayload) => Promise<InstallMarketSkillResult>
 }

@@ -18,6 +18,7 @@ import {
   FolderPlus,
   FolderSearch2,
   Folders,
+  Languages,
   Moon,
   Monitor,
   PanelRight,
@@ -35,6 +36,15 @@ import {
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
+import {
+  formatAppDate,
+  getSystemLocale,
+  resolveAppLocale,
+  translate,
+  type LanguagePreference,
+  type SupportedLocale,
+  type TranslationKey,
+} from './i18n'
 import type {
   AppSnapshot,
   AppTab,
@@ -43,6 +53,7 @@ import type {
   MarketSkill,
   MarketSnapshot,
   SkillRecord,
+  SkillUpdateStatus,
   SkillSource,
   SourceKind,
 } from './shared/contracts'
@@ -56,45 +67,31 @@ interface ToastMessage {
 const ALL_SOURCES_ID = 'all'
 const MARKET_PAGE_SIZE = 18
 
-const dateFormatter = new Intl.DateTimeFormat(undefined, {
-  dateStyle: 'medium',
-  timeStyle: 'short',
-})
-
-function getErrorMessage(error: unknown) {
-  if (error instanceof Error) {
-    return error.message
-  }
-
-  return 'Something went wrong.'
-}
-
-function formatDate(dateValue: string) {
-  return dateFormatter.format(new Date(dateValue))
-}
-
-function getKindLabel(kind: SourceKind) {
+function getKindLabel(kind: SourceKind, t: (key: TranslationKey, params?: Record<string, number | string>) => string) {
   if (kind === 'global') {
-    return '全局'
+    return t('kind.global')
   }
 
   if (kind === 'application') {
-    return '应用'
+    return t('kind.application')
   }
 
-  return '自定义'
+  return t('kind.custom')
 }
 
-function getRegistryStatusLabel(status: MarketRegistry['status']) {
+function getRegistryStatusLabel(
+  status: MarketRegistry['status'],
+  t: (key: TranslationKey, params?: Record<string, number | string>) => string,
+) {
   if (status === 'ready') {
-    return '可用'
+    return t('common.ready')
   }
 
   if (status === 'disabled') {
-    return '已停用'
+    return t('common.disabled')
   }
 
-  return '错误'
+  return t('common.error')
 }
 
 function isExternalUrl(value: string | null | undefined) {
@@ -119,6 +116,47 @@ function mergeMarketSkillPages(current: MarketSkill[], incoming: MarketSkill[]) 
     }
   }
   return [...merged.values()]
+}
+
+function getLocalizedErrorMessage(error: unknown, locale: SupportedLocale) {
+  if (!(error instanceof Error)) {
+    return translate(locale, 'app.error.generic')
+  }
+
+  const message = error.message
+  const registryStatusMatch = message.match(/Registry request failed with status (\d+)\./)
+  if (registryStatusMatch) {
+    return translate(locale, 'error.registryRequestFailed', { status: registryStatusMatch[1] })
+  }
+
+  const downloadStatusMatch = message.match(/Download failed with status (\d+)\./)
+  if (downloadStatusMatch) {
+    return translate(locale, 'error.downloadFailed', { status: downloadStatusMatch[1] })
+  }
+
+  const archivePathMatch = message.match(/^Archive not found at (.+)\.$/)
+  if (archivePathMatch) {
+    return translate(locale, 'error.archiveNotFound', { path: archivePathMatch[1] })
+  }
+
+  const exactMap: Record<string, TranslationKey> = {
+    'Only http and https URLs can be opened in the browser.': 'error.browserUrlProtocol',
+    'Registry manifest URL is required.': 'error.registryUrlRequired',
+    'SkillsMP requires an API key. Authenticated registries are not supported yet.': 'error.authenticatedRegistryUnsupported',
+    'Market skill payload is incomplete.': 'error.marketSkillIncomplete',
+    'This skill is not managed by Market.': 'error.marketSkillNotManaged',
+    'Unable to find the latest Market version for this skill.': 'error.latestVersionNotFound',
+    'Unable to resolve skill source for the edited file.': 'error.skillSourceEditedNotFound',
+    'Unable to resolve skill source after toggling state.': 'error.skillSourceToggledNotFound',
+    'Unable to resolve skill source for the selected skill.': 'error.skillSourceToggleSelectionNotFound',
+  }
+
+  const translationKey = exactMap[message]
+  if (translationKey) {
+    return translate(locale, translationKey)
+  }
+
+  return message
 }
 
 function getSelection(skills: SkillRecord[], currentSelection: string | null) {
@@ -245,16 +283,32 @@ function SourceItem({
 
 function SkillCard({
   active,
+  formattedUpdatedAt,
+  latestVersion,
   onClick,
   onDoubleClick,
   onContextMenu,
   skill,
+  statusDisabledLabel,
+  statusEnabledLabel,
+  statusSystemDisabledLabel,
+  updateAvailable,
+  updateLabel,
+  updateTitle,
 }: {
   active: boolean
+  formattedUpdatedAt: string
+  latestVersion?: string
   onClick: () => void
   onDoubleClick?: () => void
   onContextMenu?: (x: number, y: number) => void
   skill: SkillRecord
+  statusDisabledLabel: string
+  statusEnabledLabel: string
+  statusSystemDisabledLabel: string
+  updateAvailable?: boolean
+  updateLabel: string
+  updateTitle: string
 }) {
   return (
     <button
@@ -268,18 +322,25 @@ function SkillCard({
       type="button"
     >
       <div className="skill-card-name">
-        <strong>{skill.name}</strong>
+        <div className="skill-card-title">
+          <strong>{skill.name}</strong>
+          {updateAvailable ? (
+            <span className="skill-update-badge" title={latestVersion ? updateTitle : updateLabel}>
+              {updateLabel}
+            </span>
+          ) : null}
+        </div>
         <span>{skill.sourceLabel}</span>
       </div>
       <div className="skill-card-summary">{skill.description}</div>
       <div className="skill-card-footer">
-        <div className="skill-card-updated">{formatDate(skill.updatedAt)}</div>
+        <div className="skill-card-updated">{formattedUpdatedAt}</div>
         <div className="skill-card-status">
           {skill.systemDisabled ? (
-            <span className="status-pill is-disabled" title="在底层系统中被标记为停用">系统停用</span>
+            <span className="status-pill is-disabled" title={statusSystemDisabledLabel}>{statusSystemDisabledLabel}</span>
           ) : (
             <span className={`status-pill ${skill.enabled ? 'is-enabled' : 'is-disabled'}`}>
-              {skill.enabled ? '启用' : '内部停用'}
+              {skill.enabled ? statusEnabledLabel : statusDisabledLabel}
             </span>
           )}
         </div>
@@ -290,18 +351,26 @@ function SkillCard({
 
 function MarketCard({
   active,
+  installLabel,
   installing,
+  installingLabel,
   installed,
+  installedLabel,
   onClick,
   onInstall,
   skill,
+  versionPrefix,
 }: {
   active: boolean
+  installLabel: string
   installing: boolean
+  installingLabel: string
   installed: boolean
+  installedLabel: string
   onClick: () => void
   onInstall: () => void
   skill: MarketSkill
+  versionPrefix: string
 }) {
   return (
     <article
@@ -319,7 +388,7 @@ function MarketCard({
       <div className="market-card-header">
         <div className="market-card-copy">
           <strong>{skill.name}</strong>
-          <span>{skill.registryLabel} · v{skill.version}</span>
+          <span>{skill.registryLabel} · {versionPrefix}{skill.version}</span>
         </div>
 
         <button
@@ -331,10 +400,10 @@ function MarketCard({
         }}
           type="button"
         >
-          {installed ? '已安装' : installing ? '安装中...' : (
+          {installed ? installedLabel : installing ? installingLabel : (
             <>
               <Download size={13} />
-              下载
+              {installLabel}
             </>
           )}
         </button>
@@ -373,6 +442,8 @@ export default function App() {
   const [marketQuery, setMarketQuery] = useState('')
   const [marketInstallId, setMarketInstallId] = useState<string | null>(null)
   const [marketBusyAction, setMarketBusyAction] = useState<'load-more' | 'refresh' | 'registry' | null>(null)
+  const [skillUpdateMap, setSkillUpdateMap] = useState<Record<string, SkillUpdateStatus>>({})
+  const [updateBusyFilePath, setUpdateBusyFilePath] = useState<string | null>(null)
   const [isAddRegistryDialogOpen, setIsAddRegistryDialogOpen] = useState(false)
   const [newRegistryLabel, setNewRegistryLabel] = useState('')
   const [newRegistryUrl, setNewRegistryUrl] = useState('')
@@ -394,14 +465,31 @@ export default function App() {
   const [themePreference, setThemePreference] = useState<'dark' | 'light' | 'system'>(() => {
     return (localStorage.getItem('eagle-theme-preference') as 'dark' | 'light' | 'system') || 'system'
   })
+  const [languagePreference, setLanguagePreference] = useState<LanguagePreference>(() => {
+    const stored = localStorage.getItem('skillviewer-language-preference')
+    if (stored === 'system' || stored === 'zh-CN' || stored === 'en-US' || stored === 'ja-JP') {
+      return stored
+    }
+    return 'system'
+  })
 
   const deferredSearch = useDeferredValue(searchValue)
   const deferredMarketQuery = useDeferredValue(marketQuery)
   const desktopApi = typeof window !== 'undefined' ? window.skillviewer : undefined
+  const locale = languagePreference === 'system' ? getSystemLocale() : resolveAppLocale(languagePreference)
+  const t = (key: TranslationKey, params?: Record<string, number | string>) => translate(locale, key, params)
+
+  function formatDate(dateValue: string) {
+    return formatAppDate(locale, dateValue)
+  }
 
   useEffect(() => {
     localStorage.setItem('skillviewer-active-tab', activeTab)
   }, [activeTab])
+
+  useEffect(() => {
+    localStorage.setItem('skillviewer-language-preference', languagePreference)
+  }, [languagePreference])
 
   useEffect(() => {
     if (activeTab !== 'market' && isAddRegistryDialogOpen) {
@@ -495,7 +583,7 @@ export default function App() {
         pushToast('success', successMessage)
       }
     } catch (error) {
-      const message = getErrorMessage(error)
+      const message = getLocalizedErrorMessage(error, locale)
       setErrorMessage(message)
       pushToast('error', message)
     } finally {
@@ -543,7 +631,7 @@ export default function App() {
         pushToast('success', successMessage)
       }
     } catch (error) {
-      pushToast('error', getErrorMessage(error))
+      pushToast('error', getLocalizedErrorMessage(error, locale))
     } finally {
       setMarketBusyAction((current) => (current === 'refresh' ? null : current))
     }
@@ -576,7 +664,7 @@ export default function App() {
         })
       })
     } catch (error) {
-      pushToast('error', getErrorMessage(error))
+      pushToast('error', getLocalizedErrorMessage(error, locale))
     } finally {
       setMarketBusyAction((current) => (current === 'load-more' ? null : current))
     }
@@ -609,7 +697,7 @@ export default function App() {
           return
         }
 
-        const message = getErrorMessage(error)
+        const message = getLocalizedErrorMessage(error, locale)
         setErrorMessage(message)
         pushToast('error', message)
       } finally {
@@ -624,7 +712,7 @@ export default function App() {
     return () => {
       isMounted = false
     }
-  }, [desktopApi])
+  }, [desktopApi, locale])
 
   useEffect(() => {
     if (!desktopApi || activeTab !== 'market') {
@@ -648,7 +736,7 @@ export default function App() {
         })
       } catch (error) {
         if (isMounted) {
-          pushToast('error', getErrorMessage(error))
+          pushToast('error', getLocalizedErrorMessage(error, locale))
         }
       } finally {
         if (isMounted) {
@@ -662,7 +750,7 @@ export default function App() {
     return () => {
       isMounted = false
     }
-  }, [activeTab, desktopApi])
+  }, [activeTab, desktopApi, locale])
 
   useEffect(() => {
     if (!desktopApi || activeTab !== 'market') {
@@ -700,7 +788,7 @@ export default function App() {
         })
       } catch (error) {
         if (isMounted) {
-          pushToast('error', getErrorMessage(error))
+          pushToast('error', getLocalizedErrorMessage(error, locale))
         }
       } finally {
         if (isMounted) {
@@ -714,7 +802,47 @@ export default function App() {
     return () => {
       isMounted = false
     }
-  }, [activeTab, deferredMarketQuery, desktopApi, selectedMarketRegistryId])
+  }, [activeTab, deferredMarketQuery, desktopApi, locale, selectedMarketRegistryId])
+
+  useEffect(() => {
+    if (!desktopApi || !snapshot) {
+      return
+    }
+
+    const marketManagedSkills = snapshot.skills.filter((skill) => skill.marketOrigin)
+    if (marketManagedSkills.length === 0) {
+      setSkillUpdateMap({})
+      return
+    }
+
+    const api = desktopApi
+    let isMounted = true
+
+    async function loadSkillUpdates() {
+      try {
+        const updates = await api.checkSkillUpdates()
+        if (!isMounted) {
+          return
+        }
+
+        startTransition(() => {
+          setSkillUpdateMap(
+            Object.fromEntries(updates.map((update) => [update.filePath, update])),
+          )
+        })
+      } catch {
+        if (isMounted) {
+          setSkillUpdateMap({})
+        }
+      }
+    }
+
+    void loadSkillUpdates()
+
+    return () => {
+      isMounted = false
+    }
+  }, [desktopApi, snapshot])
 
   const skills = snapshot?.skills ?? []
   const visibleSkills = skills.filter((skill) => {
@@ -790,6 +918,7 @@ export default function App() {
     visibleSkills.find((skill) => skill.id === selectedSkillId) ??
     skills.find((skill) => skill.id === selectedSkillId) ??
     null
+  const selectedSkillUpdate = selectedSkill ? skillUpdateMap[selectedSkill.filePath] ?? null : null
   const selectedMarketSkill =
     visibleMarketSkills.find((skill) => skill.id === selectedMarketSkillId) ??
     marketSkills.find((skill) => skill.id === selectedMarketSkillId) ??
@@ -857,9 +986,9 @@ export default function App() {
         setSnapshot(nextSnapshot)
         setSelectedSkillId((current) => getSelection(nextSnapshot.skills, current))
       })
-      pushToast('success', '已添加新的 skill 文件夹。')
+      pushToast('success', t('library.toast.addSource'))
     } catch (error) {
-      pushToast('error', getErrorMessage(error))
+      pushToast('error', getLocalizedErrorMessage(error, locale))
     } finally {
       setBusyAction((current) => (current === 'add' ? null : current))
     }
@@ -877,9 +1006,9 @@ export default function App() {
         setSelectedSourceId((current) => (current === source.id ? ALL_SOURCES_ID : current))
         setSelectedSkillId((current) => getSelection(nextSnapshot.skills, current))
       })
-      pushToast('info', `已移除来源「${source.label}」。`)
+      pushToast('info', t('library.toast.removeSource', { label: source.label }))
     } catch (error) {
-      pushToast('error', getErrorMessage(error))
+      pushToast('error', getLocalizedErrorMessage(error, locale))
     }
   }
 
@@ -902,9 +1031,9 @@ export default function App() {
         delete nextDrafts[selectedSkill.id]
         return nextDrafts
       })
-      pushToast('success', '内容已同步到本地文件。')
+      pushToast('success', t('library.toast.save'))
     } catch (error) {
-      pushToast('error', getErrorMessage(error))
+      pushToast('error', getLocalizedErrorMessage(error, locale))
     } finally {
       setBusyAction((current) => (current === 'save' ? null : current))
     }
@@ -933,9 +1062,9 @@ export default function App() {
         }
         return nextDrafts
       })
-      pushToast('success', nextSkill.enabled ? 'Skill 已重新启用。' : 'Skill 已停用。')
+      pushToast('success', nextSkill.enabled ? t('library.toast.toggleEnabled') : t('library.toast.toggleDisabled'))
     } catch (error) {
-      pushToast('error', getErrorMessage(error))
+      pushToast('error', getLocalizedErrorMessage(error, locale))
     } finally {
       setBusyAction((current) => (current === 'toggle' ? null : current))
     }
@@ -949,7 +1078,7 @@ export default function App() {
     try {
       await desktopApi.revealSkill(selectedSkill.filePath)
     } catch (error) {
-      pushToast('error', getErrorMessage(error))
+      pushToast('error', getLocalizedErrorMessage(error, locale))
     }
   }
 
@@ -961,7 +1090,24 @@ export default function App() {
     try {
       await desktopApi.openExternal(url)
     } catch (error) {
-      pushToast('error', getErrorMessage(error))
+      pushToast('error', getLocalizedErrorMessage(error, locale))
+    }
+  }
+
+  async function handleUpdateInstalledSkill(skill: SkillRecord) {
+    if (!desktopApi || !skill.marketOrigin) {
+      return
+    }
+
+    setUpdateBusyFilePath(skill.filePath)
+
+    try {
+      await desktopApi.updateInstalledSkill({ filePath: skill.filePath })
+      await refreshSnapshot(t('library.toast.update'))
+    } catch (error) {
+      pushToast('error', getLocalizedErrorMessage(error, locale))
+    } finally {
+      setUpdateBusyFilePath((current) => (current === skill.filePath ? null : current))
     }
   }
 
@@ -976,9 +1122,9 @@ export default function App() {
       const result = await desktopApi.installMarketSkill({ skill })
       await refreshSnapshot()
       await refreshMarketSnapshot()
-      pushToast('success', `已安装到 ${result.installedPath}`)
+      pushToast('success', t('market.toast.installSuccess', { path: result.installedPath }))
     } catch (error) {
-      pushToast('error', getErrorMessage(error))
+      pushToast('error', getLocalizedErrorMessage(error, locale))
     } finally {
       setMarketInstallId((current) => (current === skill.id ? null : current))
     }
@@ -1001,9 +1147,9 @@ export default function App() {
       setNewRegistryUrl('')
       setIsAddRegistryDialogOpen(false)
       await refreshMarketSnapshot(undefined, { query: deferredMarketQuery, registryId: 'all' })
-      pushToast('success', 'Registry 已添加。')
+      pushToast('success', t('market.toast.addRegistry'))
     } catch (error) {
-      pushToast('error', getErrorMessage(error))
+      pushToast('error', getLocalizedErrorMessage(error, locale))
     } finally {
       setMarketBusyAction((current) => (current === 'registry' ? null : current))
     }
@@ -1024,9 +1170,9 @@ export default function App() {
         query: deferredMarketQuery,
         registryId: nextRegistryId,
       })
-      pushToast('info', 'Registry 已移除。')
+      pushToast('info', t('market.toast.registryRemoved'))
     } catch (error) {
-      pushToast('error', getErrorMessage(error))
+      pushToast('error', getLocalizedErrorMessage(error, locale))
     } finally {
       setMarketBusyAction((current) => (current === 'registry' ? null : current))
     }
@@ -1056,8 +1202,8 @@ export default function App() {
     return (
       <div className="desktop-fallback">
         <EmptyState
-          description="这个界面依赖本地文件系统桥接，直接在浏览器里打开时不会连接到桌面能力。"
-          title="请通过 Electron 启动 SkillViewer"
+          description={t('app.desktopFallbackDescription')}
+          title={t('app.desktopFallbackTitle')}
         />
       </div>
     )
@@ -1068,14 +1214,17 @@ export default function App() {
     sourceCounts.set(skill.sourceId, (sourceCounts.get(skill.sourceId) ?? 0) + 1)
   }
 
-  const selectedSourceTitle = selectedSource ? selectedSource.label : 'All Skills'
+  const selectedSourceTitle = selectedSource ? selectedSource.label : t('library.titleAll')
   const selectedSourceSubtitle = selectedSource
-    ? `${getKindLabel(selectedSource.kind)} 来源 · ${selectedSource.path}`
-    : '跨所有来源聚合浏览'
-  const selectedMarketTitle = selectedMarketRegistry ? selectedMarketRegistry.label : 'Market'
+    ? t('library.selectedSourceSubtitle', {
+        kind: getKindLabel(selectedSource.kind, t),
+        path: selectedSource.path,
+      })
+    : t('library.selectedSourceSubtitleAll')
+  const selectedMarketTitle = selectedMarketRegistry ? selectedMarketRegistry.label : t('common.market')
   const selectedMarketSubtitle = selectedMarketRegistry
-    ? '按需浏览当前 registry 的技能结果，支持搜索、安装和逐步继续加载。'
-    : '聚合多个 registry 的技能结果，并按需分批加载可安装的 skills。'
+    ? t('market.selectedRegistrySubtitle')
+    : t('market.aggregateDescription')
   const selectedMarketRegistryLoadedCount = selectedMarketRegistry
     ? (marketSkillCounts.get(selectedMarketRegistry.id) ?? 0)
     : 0
@@ -1088,7 +1237,7 @@ export default function App() {
             <img alt="SkillViewer Logo" className="chrome-brand-logo" src="./logo.webp" />
             <div className="chrome-brand-copy">
               <strong>SkillViewer</strong>
-              <span>Local skill library for macOS</span>
+              <span>{t('app.brandTagline')}</span>
             </div>
           </div>
 
@@ -1099,7 +1248,7 @@ export default function App() {
               type="button"
             >
               <Folders size={14} />
-              Library
+              {t('common.library')}
             </button>
             <button
               className={activeTab === 'market' ? 'is-active' : ''}
@@ -1107,7 +1256,7 @@ export default function App() {
               type="button"
             >
               <Store size={14} />
-              Market
+              {t('common.market')}
             </button>
           </div>
         </div>
@@ -1133,13 +1282,13 @@ export default function App() {
                     zIndex: 100, width: '200px', display: 'flex', flexDirection: 'column', gap: '16px'
                   }}>
                     <div>
-                      <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-soft)', marginBottom: '8px', textTransform: 'uppercase' }}>来源 (Source)</div>
+                      <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-soft)', marginBottom: '8px', textTransform: 'uppercase' }}>{t('filter.captionSource')}</div>
                       <select
                         style={{ width: '100%', padding: '6px', fontSize: '12px', background: 'var(--button-bg)', border: '1px solid var(--line)', borderRadius: '4px', color: 'var(--text)', outline: 'none' }}
                         value={selectedSourceId}
                         onChange={(e) => setSelectedSourceId(e.target.value)}
                       >
-                        <option value={ALL_SOURCES_ID}>所有来源</option>
+                        <option value={ALL_SOURCES_ID}>{t('filter.allSources')}</option>
                         {snapshot?.sources.map((src) => (
                           <option key={src.id} value={src.id}>{src.label}</option>
                         ))}
@@ -1147,19 +1296,19 @@ export default function App() {
                     </div>
 
                     <div>
-                      <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-soft)', marginBottom: '8px', textTransform: 'uppercase' }}>状态 (Status)</div>
+                      <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-soft)', marginBottom: '8px', textTransform: 'uppercase' }}>{t('filter.captionStatus')}</div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '12px' }}>
                         <label style={{ display: 'flex', gap: '6px', cursor: 'pointer', alignItems: 'center' }}>
                           <input type="radio" checked={filterMode === 'all'} onChange={() => { setFilterMode('all'); localStorage.setItem('eagle-filter-mode', 'all') }} />
-                          所有状态
+                          {t('filter.allStatuses')}
                         </label>
                         <label style={{ display: 'flex', gap: '6px', cursor: 'pointer', alignItems: 'center' }}>
                           <input type="radio" checked={filterMode === 'enabled'} onChange={() => { setFilterMode('enabled'); localStorage.setItem('eagle-filter-mode', 'enabled') }} />
-                          仅显示启用
+                          {t('filter.enabledOnly')}
                         </label>
                         <label style={{ display: 'flex', gap: '6px', cursor: 'pointer', alignItems: 'center' }}>
                           <input type="radio" checked={filterMode === 'disabled'} onChange={() => { setFilterMode('disabled'); localStorage.setItem('eagle-filter-mode', 'disabled') }} />
-                          仅显示停用
+                          {t('filter.disabledOnly')}
                         </label>
                       </div>
                     </div>
@@ -1173,7 +1322,7 @@ export default function App() {
                   onChange={(event) => {
                     setSearchValue(event.target.value)
                   }}
-                  placeholder="搜索名称、描述、来源、路径"
+                  placeholder={t('library.searchPlaceholder')}
                   type="search"
                   value={searchValue}
                 />
@@ -1186,7 +1335,7 @@ export default function App() {
                 onChange={(event) => {
                   setMarketQuery(event.target.value)
                 }}
-                placeholder="搜索 Market 名称、描述、作者、标签"
+                placeholder={t('market.searchPlaceholder')}
                 type="search"
                 value={marketQuery}
               />
@@ -1195,13 +1344,36 @@ export default function App() {
         </div>
 
         <div className="chrome-actions">
+          <label className="language-select" title={t('language.label')}>
+            <Languages size={14} />
+            <select
+              aria-label={t('language.label')}
+              onChange={(event) => {
+                setLanguagePreference(event.target.value as LanguagePreference)
+              }}
+              value={languagePreference}
+            >
+              <option value="system">{t('language.system')}</option>
+              <option value="zh-CN">{t('language.zh')}</option>
+              <option value="en-US">{t('language.english')}</option>
+              <option value="ja-JP">{t('language.japanese')}</option>
+            </select>
+          </label>
+
           <button
             className="chrome-button"
             onClick={() => {
               const next = themePreference === 'system' ? 'light' : themePreference === 'light' ? 'dark' : 'system'
               setThemePreference(next)
             }}
-            title={`当前主题：${themePreference === 'system' ? '跟随系统' : themePreference === 'light' ? '浅色' : '深色'} (点击切换)`}
+            title={t('app.theme.title', {
+              theme:
+                themePreference === 'system'
+                  ? t('app.theme.system')
+                  : themePreference === 'light'
+                    ? t('app.theme.light')
+                    : t('app.theme.dark'),
+            })}
             type="button"
           >
             {themePreference === 'system' ? <Monitor size={15} /> : themePreference === 'light' ? <Sun size={15} /> : <Moon size={15} />}
@@ -1211,15 +1383,15 @@ export default function App() {
             className="chrome-button"
             onClick={() => {
               if (activeTab === 'library') {
-                void refreshSnapshot('列表已刷新。')
+                void refreshSnapshot(t('library.refreshSuccess'))
               } else {
-                void refreshMarketSnapshot('Market 已刷新。')
+                void refreshMarketSnapshot(t('market.refreshSuccess'))
               }
             }}
             type="button"
           >
             <RefreshCw className={(busyAction === 'refresh' || marketBusyAction === 'refresh') ? 'is-spinning' : ''} size={15} />
-            刷新
+            {t('common.refresh')}
           </button>
         </div>
       </header>
@@ -1229,12 +1401,12 @@ export default function App() {
           {activeTab === 'library' ? (
             <>
               <div className="nav-block">
-                <div className="nav-caption">Library</div>
+                <div className="nav-caption">{t('common.library')}</div>
                 <SourceItem
                   active={selectedSourceId === ALL_SOURCES_ID}
                   count={skills.length}
-                  label="All Skills"
-                  meta="跨来源聚合"
+                  label={t('common.allSkills')}
+                  meta={t('library.selectedSourceSubtitleAll')}
                   onClick={() => {
                     setSelectedSourceId(ALL_SOURCES_ID)
                   }}
@@ -1242,14 +1414,14 @@ export default function App() {
               </div>
 
               <div className="nav-block">
-                <div className="nav-caption">系统来源</div>
+                <div className="nav-caption">{t('library.sourcePrompt')}</div>
                 {systemSources.map((source) => (
                   <SourceItem
                     active={selectedSourceId === source.id}
                     count={sourceCounts.get(source.id) ?? 0}
                     key={source.id}
                     label={source.label}
-                    meta={`${getKindLabel(source.kind)} · ${source.path}`}
+                    meta={`${getKindLabel(source.kind, t)} · ${source.path}`}
                     onClick={() => {
                       setSelectedSourceId(source.id)
                     }}
@@ -1259,11 +1431,11 @@ export default function App() {
 
               <div className="nav-block">
                 <div className="nav-caption" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingRight: '12px' }}>
-                  <span>自定义来源</span>
+                  <span>{t('kind.custom')}</span>
                   <button
                     className="source-remove"
                     onClick={(e) => { e.stopPropagation(); void handleAddSource() }}
-                    title="添加自定义来源"
+                    title={t('library.sourceDialogTitle')}
                     type="button"
                     style={{ opacity: 0.6, cursor: 'pointer' }}
                   >
@@ -1273,8 +1445,8 @@ export default function App() {
                 {customSources.length === 0 ? (
                   <EmptyState
                     compact
-                    description="还没有接入自定义 skill 文件夹。"
-                    title="空来源"
+                    description={t('library.emptyDescription')}
+                    title={t('common.none')}
                   />
                 ) : (
                   customSources.map((source) => (
@@ -1283,7 +1455,7 @@ export default function App() {
                       count={sourceCounts.get(source.id) ?? 0}
                       key={source.id}
                       label={source.label}
-                      meta={`${getKindLabel(source.kind)} · ${source.path}`}
+                      meta={`${getKindLabel(source.kind, t)} · ${source.path}`}
                       onClick={() => {
                         setSelectedSourceId(source.id)
                       }}
@@ -1298,15 +1470,15 @@ export default function App() {
 
               <div className="nav-summary">
                 <div className="summary-card">
-                  <span>总 Skill</span>
+                  <span>{t('nav.totalSkills')}</span>
                   <strong>{skills.length}</strong>
                 </div>
                 <div className="summary-card">
-                  <span>来源数</span>
+                  <span>{t('common.sourcePlural')}</span>
                   <strong>{snapshot?.sources.length ?? 0}</strong>
                 </div>
                 <div className="summary-card">
-                  <span>最近刷新</span>
+                  <span>{t('nav.recentRefresh')}</span>
                   <strong>{snapshot ? formatDate(snapshot.lastRefreshedAt) : '--'}</strong>
                 </div>
               </div>
@@ -1314,12 +1486,12 @@ export default function App() {
           ) : (
             <>
               <div className="nav-block">
-                <div className="nav-caption">Marketplace</div>
+                <div className="nav-caption">{t('nav.marketplace')}</div>
                 <SourceItem
                   active={selectedMarketRegistryId === 'all'}
                   count={marketSkills.length}
-                  label="All Registries"
-                  meta="聚合市场技能"
+                  label={t('common.allRegistries')}
+                  meta={t('market.aggregateDescription')}
                   onClick={() => {
                     setSelectedMarketRegistryId('all')
                   }}
@@ -1327,7 +1499,7 @@ export default function App() {
               </div>
 
               <div className="nav-block">
-                <div className="nav-caption">Registry 列表</div>
+                <div className="nav-caption">{t('market.registryList')}</div>
                 {(marketSnapshot?.registries ?? []).map((registry) => (
                   <div className={`source-item ${selectedMarketRegistryId === registry.id ? 'is-active' : ''}`} key={registry.id}>
                     <button
@@ -1339,7 +1511,7 @@ export default function App() {
                     >
                       <div className="source-main-copy">
                         <strong>{registry.label}</strong>
-                        <span>{registry.status === 'ready' ? '可用' : registry.status === 'disabled' ? '已停用' : '读取失败'}</span>
+                        <span>{getRegistryStatusLabel(registry.status, t)}</span>
                       </div>
                     </button>
 
@@ -1352,7 +1524,7 @@ export default function App() {
                             event.stopPropagation()
                             void handleRemoveMarketRegistry(registry.id)
                           }}
-                          title="移除 Registry"
+                          title={t('common.remove')}
                           type="button"
                         >
                           <Trash2 size={13} />
@@ -1373,22 +1545,22 @@ export default function App() {
               <>
                 <div className="pane-header">
                   <div className="pane-header-copy">
-                    <span className="pane-kicker">Skill Library</span>
+                    <span className="pane-kicker">{t('library.paneTitle')}</span>
                     <h1>{selectedSourceTitle}</h1>
                     <p>{selectedSourceSubtitle}</p>
                   </div>
 
                   <div className="pane-metrics">
                     <div className="metric-card">
-                      <span>可见</span>
+                      <span>{t('library.count.visible')}</span>
                       <strong>{visibleSkills.length}</strong>
                     </div>
                     <div className="metric-card">
-                      <span>启用</span>
+                      <span>{t('library.count.enabled')}</span>
                       <strong>{visibleEnabledCount}</strong>
                     </div>
                     <div className="metric-card">
-                      <span>停用</span>
+                      <span>{t('library.count.disabled')}</span>
                       <strong>{visibleDisabledCount}</strong>
                     </div>
                   </div>
@@ -1400,19 +1572,21 @@ export default function App() {
                   <div className="table-body">
                     {!snapshot ? (
                       <EmptyState
-                        description="首次扫描会读取你接入的目录，并提取 frontmatter、描述和时间信息。"
-                        title="正在载入本地 skill"
+                        description={t('library.scanLoadingDescription')}
+                        title={t('library.scanLoadingTitle')}
                       />
                     ) : visibleSkills.length === 0 ? (
                       <EmptyState
-                        description="试试切换来源、清空搜索，或者添加一个包含 `SKILL.md` 的目录。"
-                        title="没有匹配结果"
+                        description={t('library.emptyDescription')}
+                        title={t('library.emptyTitle')}
                       />
                     ) : (
                       visibleSkills.map((skill) => (
                         <SkillCard
                           active={selectedSkillId === skill.id}
+                          formattedUpdatedAt={formatDate(skill.updatedAt)}
                           key={skill.id}
+                          latestVersion={skillUpdateMap[skill.filePath]?.latestVersion}
                           onClick={() => {
                             setSelectedSkillId(skill.id)
                           }}
@@ -1423,6 +1597,12 @@ export default function App() {
                           onContextMenu={(x, y) => {
                             setContextMenu({ x, y, skillId: skill.id })
                           }}
+                          statusDisabledLabel={t('library.skillInternalDisabled')}
+                          statusEnabledLabel={t('common.enabled')}
+                          statusSystemDisabledLabel={t('common.systemDisabled')}
+                          updateAvailable={skillUpdateMap[skill.filePath]?.updateAvailable}
+                          updateLabel={t('market.updateBadge')}
+                          updateTitle={t('library.updateAvailable')}
                           skill={skill}
                         />
                       ))
@@ -1431,7 +1611,7 @@ export default function App() {
                 </div>
               </>
             ) : !selectedSkill ? (
-              <EmptyState description="此模式下需要选中一个Skill" title="无内容" />
+              <EmptyState description={t('library.noContent')} title={t('library.noContentTitle')} />
             ) : (
               <div
                 style={{
@@ -1453,7 +1633,7 @@ export default function App() {
                   <button
                     onClick={() => {
                       if (hasUnsavedChanges) {
-                        if (window.confirm('有未保存内容，是否丢弃？')) {
+                        if (window.confirm(t('library.skillMode.discardConfirm'))) {
                           setDrafts((prev) => {
                             const next = { ...prev }
                             if (selectedSkill) delete next[selectedSkill.id]
@@ -1478,7 +1658,7 @@ export default function App() {
                       fontWeight: 500,
                     }}
                   >
-                    <ArrowLeft size={16} /> 返回列表
+                    <ArrowLeft size={16} /> {t('library.skillMode.back')}
                   </button>
 
                   <div
@@ -1486,9 +1666,9 @@ export default function App() {
                     style={{ margin: 0, padding: 0, border: 'none', background: 'var(--button-bg)' }}
                   >
                     {[
-                      { icon: Eye, id: 'preview', label: '预览' },
-                      { icon: FileCode2, id: 'source', label: '原文' },
-                      { icon: PencilLine, id: 'edit', label: '编辑' },
+                      { icon: Eye, id: 'preview', label: t('library.skillMode.previewTab') },
+                      { icon: FileCode2, id: 'source', label: t('library.skillMode.sourceTab') },
+                      { icon: PencilLine, id: 'edit', label: t('library.skillMode.editTab') },
                     ].map((item) => (
                       <button
                         className={detailMode === item.id ? 'is-active' : ''}
@@ -1557,7 +1737,7 @@ export default function App() {
                           cursor: 'pointer',
                           color: showPreview ? 'var(--accent)' : 'var(--text-soft)',
                         }}
-                        title={showPreview ? '关闭实时预览' : '开启侧边实时预览'}
+                        title={showPreview ? t('library.skillMode.toggleLivePreviewOff') : t('library.skillMode.toggleLivePreviewOn')}
                       >
                         <PanelRight size={15} />
                       </button>
@@ -1591,7 +1771,7 @@ export default function App() {
                       }}
                     >
                       <Save size={14} />
-                      {busyAction === 'save' ? '保存中...' : '保存修改'}
+                      {busyAction === 'save' ? t('library.skillMode.saveBusy') : t('library.skillMode.saveChanges')}
                     </button>
                   </div>
                 </div>
@@ -1623,7 +1803,7 @@ export default function App() {
                         </div>
 
                         <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                          {previewSource.body || '这份 skill 目前没有正文内容。'}
+                          {previewSource.body || t('library.skillMode.noBody')}
                         </ReactMarkdown>
                       </article>
                     ) : null}
@@ -1638,8 +1818,8 @@ export default function App() {
                       <div className="editor-shell" style={{ fontSize: '1em' }}>
                         <div className="editor-panel">
                           <div className="editor-panel-head">
-                            <span>Markdown Source</span>
-                            <strong>{hasUnsavedChanges ? '未保存改动' : '与磁盘同步'}</strong>
+                            <span>{t('library.skillMode.sourceTitle')}</span>
+                            <strong>{hasUnsavedChanges ? t('library.skillMode.unsaved') : t('library.skillMode.synced')}</strong>
                           </div>
                           <textarea
                             className="skill-editor"
@@ -1662,8 +1842,8 @@ export default function App() {
                         {showPreview ? (
                           <div className="editor-panel" style={{ background: 'var(--main-bg)' }}>
                             <div className="editor-panel-head">
-                              <span>Live Preview</span>
-                              <strong>{draftPreviewSource.frontmatter.length} 项 frontmatter</strong>
+                              <span>{t('library.skillMode.livePreview')}</span>
+                              <strong>{t('status.frontmatterCount', { count: draftPreviewSource.frontmatter.length })}</strong>
                             </div>
                             <article
                               className="document-surface markdown-surface is-editor-preview"
@@ -1681,7 +1861,7 @@ export default function App() {
                                 ))}
                               </div>
                               <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                {draftPreviewSource.body || '这份 skill 目前没有正文内容。'}
+                                {draftPreviewSource.body || t('library.skillMode.noBody')}
                               </ReactMarkdown>
                             </article>
                           </div>
@@ -1701,10 +1881,10 @@ export default function App() {
                 >
                   <div className="statusbar-note">
                     <ShieldCheck size={14} />
-                    <span>{hasUnsavedChanges ? '有未保存改动' : '内容已同步到本地文件'}</span>
+                    <span>{hasUnsavedChanges ? t('library.unsavedChanges') : t('status.synced')}</span>
                   </div>
                   <div className="statusbar-actions">
-                    <span className="shortcut-hint">Cmd/Ctrl + S 保存</span>
+                    <span className="shortcut-hint">{t('context.shortcutSave')}</span>
                   </div>
                 </div>
               </div>
@@ -1713,18 +1893,20 @@ export default function App() {
             <>
               <div className="pane-header">
                 <div className="pane-header-copy">
-                  <span className="pane-kicker">Marketplace</span>
+                  <span className="pane-kicker">{t('nav.marketplace')}</span>
                   <h1>{selectedMarketTitle}</h1>
                   <p>{selectedMarketSubtitle}</p>
                   <div className="pane-header-meta">
                     {selectedMarketRegistry ? (
                       <>
                         <span className={`registry-badge registry-${selectedMarketRegistry.status}`}>
-                          {getRegistryStatusLabel(selectedMarketRegistry.status)}
+                          {getRegistryStatusLabel(selectedMarketRegistry.status, t)}
                         </span>
-                        <span className="pane-meta-pill">已加载 {selectedMarketRegistryLoadedCount}</span>
                         <span className="pane-meta-pill">
-                          {selectedMarketRegistry.system ? '系统源' : '自定义源'}
+                          {t('market.loadedRegistryCount', { count: selectedMarketRegistryLoadedCount })}
+                        </span>
+                        <span className="pane-meta-pill">
+                          {selectedMarketRegistry.system ? t('market.registrySystem') : t('market.registryCustom')}
                         </span>
                         {isExternalUrl(selectedMarketRegistry.manifestUrl) ? (
                           <button
@@ -1732,7 +1914,7 @@ export default function App() {
                             onClick={() => {
                               void handleOpenExternal(selectedMarketRegistry.manifestUrl)
                             }}
-                            title={`在浏览器打开 ${selectedMarketRegistry.manifestUrl}`}
+                            title={t('common.openExternal', { url: selectedMarketRegistry.manifestUrl })}
                             type="button"
                           >
                             {selectedMarketRegistry.manifestUrl}
@@ -1749,13 +1931,13 @@ export default function App() {
                     ) : (
                       <>
                         <span className="pane-meta-pill">
-                          {marketRegistries.length} 个 registry
+                          {t('market.aggregateMetaRegistryCount', { count: marketRegistries.length })}
                         </span>
                         <span className="pane-meta-pill">
-                          远端可用 {remoteReadyRegistryCount}
+                          {t('market.aggregateMetaRemoteReady', { count: remoteReadyRegistryCount })}
                         </span>
                         <span className="pane-meta-pill">
-                          已加载 {visibleMarketSkills.length}
+                          {t('market.aggregateMetaLoaded', { count: visibleMarketSkills.length })}
                         </span>
                       </>
                     )}
@@ -1769,20 +1951,20 @@ export default function App() {
                     type="button"
                   >
                     <FolderPlus size={15} />
-                    Add Registry
+                    {t('common.addRegistry')}
                   </button>
 
                   <div className="pane-metrics">
                     <div className="metric-card">
-                      <span>已加载</span>
+                      <span>{t('market.loaded')}</span>
                       <strong>{visibleMarketSkills.length}</strong>
                     </div>
                     <div className="metric-card">
-                      <span>已装</span>
+                      <span>{t('market.typeInstalled')}</span>
                       <strong>{visibleInstalledMarketCount}</strong>
                     </div>
                     <div className="metric-card">
-                      <span>远端源</span>
+                      <span>{t('market.remoteCount')}</span>
                       <strong>{remoteReadyRegistryCount}</strong>
                     </div>
                   </div>
@@ -1797,20 +1979,23 @@ export default function App() {
                 <div className="table-body market-table-body">
                   {!marketSnapshot ? (
                     <EmptyState
-                      description="正在加载 registry 清单，稍后就会展示可安装的 skills。"
-                      title="正在连接 Market"
+                      description={t('market.emptyLoadingDescription')}
+                      title={t('market.emptyLoadingTitle')}
                     />
                   ) : visibleMarketSkills.length === 0 ? (
                     <EmptyState
-                      description="当前筛选下还没有可展示的 Market skill。你可以切换 registry、恢复启用，或添加一个新的 manifest。"
-                      title="没有匹配的 Market Skill"
+                      description={t('market.emptyDescription')}
+                      title={t('market.emptyTitle')}
                     />
                   ) : (
                     visibleMarketSkills.map((skill) => (
                       <MarketCard
                         active={selectedMarketSkillId === skill.id}
+                        installLabel={t('common.download')}
                         installed={installedSkillNameSet.has(skill.name.trim().toLowerCase())}
                         installing={marketInstallId === skill.id}
+                        installingLabel={t('common.installing')}
+                        installedLabel={t('common.installed')}
                         key={skill.id}
                         onClick={() => {
                           setSelectedMarketSkillId(skill.id)
@@ -1819,6 +2004,7 @@ export default function App() {
                           void handleInstallMarketSkill(skill)
                         }}
                         skill={skill}
+                        versionPrefix="v"
                       />
                     ))
                   )}
@@ -1827,8 +2013,8 @@ export default function App() {
                 {visibleMarketSkills.length > 0 ? (
                   <div className="market-loadmore-strip">
                     <span className="market-loadmore-note">
-                      已加载 {visibleMarketSkills.length} 条
-                      {marketHasMore ? '，可继续获取更多结果' : '，当前已到达本轮结果末尾'}
+                      {t('market.loadedCount', { count: visibleMarketSkills.length })}
+                      {marketHasMore ? `, ${t('market.loadMoreReady')}` : `, ${t('market.loadMoreDone')}`}
                     </span>
 
                     {marketHasMore ? (
@@ -1844,7 +2030,7 @@ export default function App() {
                           className={marketBusyAction === 'load-more' ? 'is-spinning' : ''}
                           size={15}
                         />
-                        {marketBusyAction === 'load-more' ? '加载中...' : '加载更多'}
+                        {marketBusyAction === 'load-more' ? t('market.loadMoreBusy') : t('market.loadMore')}
                       </button>
                     ) : null}
                   </div>
@@ -1858,19 +2044,33 @@ export default function App() {
           {activeTab === 'library' ? (
             !selectedSkill ? (
               <EmptyState
-                description="选择一个 skill 后，这里会进入阅读、编辑和启停操作工作台。"
-                title="右侧详情面板"
+                description={t('library.inspectorEmptyDescription')}
+                title={t('library.inspectorEmptyTitle')}
               />
             ) : (
               <>
                 <div className="detail-header">
                   <div className="detail-header-copy">
-                    <span className="pane-kicker">Inspector</span>
+                    <span className="pane-kicker">{t('library.inspectorEmptyTitle')}</span>
                     <h2>{selectedSkill.name}</h2>
                     <p>{selectedSkill.description}</p>
                   </div>
 
                   <div className="detail-actions">
+                    {selectedSkillUpdate?.updateAvailable ? (
+                      <button
+                        className="detail-button is-accent"
+                        disabled={updateBusyFilePath === selectedSkill.filePath}
+                        onClick={() => {
+                          void handleUpdateInstalledSkill(selectedSkill)
+                        }}
+                        type="button"
+                      >
+                        <RefreshCw className={updateBusyFilePath === selectedSkill.filePath ? 'is-spinning' : ''} size={15} />
+                        {updateBusyFilePath === selectedSkill.filePath ? t('library.updateButtonBusy') : t('library.updateButton')}
+                      </button>
+                    ) : null}
+
                     <button
                       className="detail-button"
                       onClick={() => {
@@ -1879,7 +2079,7 @@ export default function App() {
                       type="button"
                     >
                       <FolderSearch2 size={15} />
-                      Finder
+                      {t('common.finder')}
                     </button>
 
                     <button
@@ -1890,28 +2090,59 @@ export default function App() {
                       type="button"
                     >
                       <CircleOff size={15} />
-                      {selectedSkill.enabled ? '停用' : '启用'}
+                      {selectedSkill.enabled ? t('common.disable') : t('common.enable')}
                     </button>
                   </div>
                 </div>
 
                 <div className="detail-properties">
                   <div className="detail-prop-row">
-                    <div className="detail-prop-label">状态</div>
+                    <div className="detail-prop-label">{t('common.status')}</div>
                     <div className="detail-prop-value">
                       <span
                         className={`status-pill ${selectedSkill.enabled ? 'is-enabled' : 'is-disabled'}`}
                       >
-                        {selectedSkill.enabled ? '已启用' : '已停用'}
+                        {selectedSkill.enabled ? t('common.enabled') : t('common.disabled')}
                       </span>
                     </div>
                   </div>
                   <div className="detail-prop-row">
-                    <div className="detail-prop-label">来源</div>
+                    <div className="detail-prop-label">{t('common.source')}</div>
                     <div className="detail-prop-value">{selectedSkill.sourceLabel}</div>
                   </div>
+                  {selectedSkill.marketOrigin ? (
+                    <div className="detail-prop-row">
+                      <div className="detail-prop-label">{t('library.marketOrigin')}</div>
+                      <div className="detail-prop-value">
+                        {selectedSkill.marketOrigin.registryLabel}
+                      </div>
+                    </div>
+                  ) : null}
+                  {selectedSkill.marketOrigin ? (
+                    <div className="detail-prop-row">
+                      <div className="detail-prop-label">{t('common.version')}</div>
+                      <div className="detail-prop-value">
+                        <span className="context-chip">{t('library.versionNow', { version: selectedSkill.marketOrigin.version })}</span>
+                        {selectedSkillUpdate?.updateAvailable ? (
+                          <span className="context-chip">
+                            {t('library.versionLatest', { version: selectedSkillUpdate.latestVersion })}
+                          </span>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : null}
+                  {selectedSkillUpdate?.updateAvailable ? (
+                    <div className="detail-prop-row">
+                      <div className="detail-prop-label">{t('common.update')}</div>
+                      <div className="detail-prop-value">
+                        <span className="skill-update-badge">
+                          {t('library.marketVersionUpdate', { version: selectedSkillUpdate.latestVersion })}
+                        </span>
+                      </div>
+                    </div>
+                  ) : null}
                   <div className="detail-prop-row">
-                    <div className="detail-prop-label">路径</div>
+                    <div className="detail-prop-label">{t('common.path')}</div>
                     <div className="detail-prop-value">
                       <span className="context-chip">
                         {selectedSkill.relativePath === '.' ? '' : `${selectedSkill.relativePath}/`}
@@ -1920,16 +2151,16 @@ export default function App() {
                     </div>
                   </div>
                   <div className="detail-prop-row">
-                    <div className="detail-prop-label">添加时间</div>
+                    <div className="detail-prop-label">{t('common.addedAt')}</div>
                     <div className="detail-prop-value">{formatDate(selectedSkill.addedAt)}</div>
                   </div>
                   <div className="detail-prop-row">
-                    <div className="detail-prop-label">更新时间</div>
+                    <div className="detail-prop-label">{t('common.updatedAt')}</div>
                     <div className="detail-prop-value">{formatDate(selectedSkill.updatedAt)}</div>
                   </div>
                   <div className="detail-prop-row">
-                    <div className="detail-prop-label">Frontmatter</div>
-                    <div className="detail-prop-value">{selectedSkill.frontmatter.length} 项</div>
+                    <div className="detail-prop-label">{t('common.frontmatter')}</div>
+                    <div className="detail-prop-value">{selectedSkill.frontmatter.length}</div>
                   </div>
                 </div>
               </>
@@ -1938,18 +2169,18 @@ export default function App() {
             <>
               <div className="detail-header">
                 <div className="detail-header-copy">
-                  <span className="pane-kicker">Market Inspector</span>
+                  <span className="pane-kicker">{t('market.inspectorTitle')}</span>
                   <h2>
                     {selectedMarketSkill?.name ??
                       selectedMarketRegistry?.label ??
-                      'Market Overview'}
+                      t('market.overviewTitle')}
                   </h2>
                   <p>
                     {selectedMarketSkill?.description ??
                       (selectedMarketRegistry
-                        ? '查看当前 registry 的状态、清单链接和已加载结果。'
+                        ? t('market.inspectorRegistryDescription')
                         : null) ??
-                      '从多个 registry 聚合检索技能，并直接安装到统一的全局库。'}
+                      t('market.inspectorDescription')}
                   </p>
                 </div>
 
@@ -1965,10 +2196,10 @@ export default function App() {
                     >
                       <Download size={15} />
                       {selectedMarketSkillInstalled
-                        ? '已安装'
+                        ? t('common.installed')
                         : marketInstallId === selectedMarketSkill.id
-                          ? '安装中...'
-                          : '安装到全局库'}
+                          ? t('common.installing')
+                          : t('market.installButton')}
                     </button>
                   </div>
                 ) : null}
@@ -1978,31 +2209,31 @@ export default function App() {
                 {selectedMarketSkill ? (
                   <>
                     <div className="detail-prop-row">
-                      <div className="detail-prop-label">状态</div>
+                      <div className="detail-prop-label">{t('common.status')}</div>
                       <div className="detail-prop-value">
                         <span
                           className={`status-pill ${
                             selectedMarketSkillInstalled ? 'is-enabled' : 'is-disabled'
                           }`}
                         >
-                          {selectedMarketSkillInstalled ? '已安装' : '未安装'}
+                          {selectedMarketSkillInstalled ? t('market.skillInstalledStatus') : t('market.skillNotInstalledStatus')}
                         </span>
                       </div>
                     </div>
                     <div className="detail-prop-row">
-                      <div className="detail-prop-label">版本</div>
+                      <div className="detail-prop-label">{t('common.version')}</div>
                       <div className="detail-prop-value">v{selectedMarketSkill.version}</div>
                     </div>
                     <div className="detail-prop-row">
-                      <div className="detail-prop-label">作者</div>
+                      <div className="detail-prop-label">{t('common.author')}</div>
                       <div className="detail-prop-value">{selectedMarketSkill.author}</div>
                     </div>
                     <div className="detail-prop-row">
-                      <div className="detail-prop-label">来源</div>
+                      <div className="detail-prop-label">{t('common.source')}</div>
                       <div className="detail-prop-value">{selectedMarketSkill.registryLabel}</div>
                     </div>
                     <div className="detail-prop-row">
-                      <div className="detail-prop-label">标签</div>
+                      <div className="detail-prop-label">{t('common.tags')}</div>
                       <div className="detail-prop-value">
                         {selectedMarketSkill.tags.length > 0 ? (
                           selectedMarketSkill.tags.map((tag) => (
@@ -2011,12 +2242,12 @@ export default function App() {
                             </span>
                           ))
                         ) : (
-                          <span className="detail-section-note">暂无标签</span>
+                          <span className="detail-section-note">{t('market.tagsEmpty')}</span>
                         )}
                       </div>
                     </div>
                     <div className="detail-prop-row">
-                      <div className="detail-prop-label">下载源</div>
+                      <div className="detail-prop-label">{t('market.installSource')}</div>
                       <div className="detail-prop-value">
                         {isExternalUrl(selectedMarketSkill.downloadUrl) ? (
                           <button
@@ -2024,7 +2255,7 @@ export default function App() {
                             onClick={() => {
                               void handleOpenExternal(selectedMarketSkill.downloadUrl)
                             }}
-                            title={`在浏览器打开 ${selectedMarketSkill.downloadUrl}`}
+                            title={t('common.openExternal', { url: selectedMarketSkill.downloadUrl })}
                             type="button"
                           >
                             {selectedMarketSkill.downloadUrl}
@@ -2036,7 +2267,7 @@ export default function App() {
                     </div>
                     {selectedMarketSkill.homepageUrl ? (
                       <div className="detail-prop-row">
-                        <div className="detail-prop-label">主页</div>
+                        <div className="detail-prop-label">{t('common.homepage')}</div>
                         <div className="detail-prop-value">
                           {isExternalUrl(selectedMarketSkill.homepageUrl) ? (
                             <button
@@ -2044,7 +2275,7 @@ export default function App() {
                               onClick={() => {
                                 void handleOpenExternal(selectedMarketSkill.homepageUrl as string)
                               }}
-                              title={`在浏览器打开 ${selectedMarketSkill.homepageUrl}`}
+                              title={t('common.openExternal', { url: selectedMarketSkill.homepageUrl })}
                               type="button"
                             >
                               {selectedMarketSkill.homepageUrl}
@@ -2056,7 +2287,7 @@ export default function App() {
                       </div>
                     ) : null}
                     <div className="detail-prop-row">
-                      <div className="detail-prop-label">安装位置</div>
+                      <div className="detail-prop-label">{t('market.installLocation')}</div>
                       <div className="detail-prop-value">
                         <span className="context-chip">
                           {marketSnapshot?.installBaseDir ?? '~/.Agents/skills'}/{selectedMarketSkill.slug}
@@ -2067,21 +2298,21 @@ export default function App() {
                 ) : selectedMarketRegistry ? (
                   <>
                     <div className="detail-prop-row">
-                      <div className="detail-prop-label">状态</div>
+                      <div className="detail-prop-label">{t('common.status')}</div>
                       <div className="detail-prop-value">
                         <span className={`registry-badge registry-${selectedMarketRegistry.status}`}>
-                          {getRegistryStatusLabel(selectedMarketRegistry.status)}
+                          {getRegistryStatusLabel(selectedMarketRegistry.status, t)}
                         </span>
                       </div>
                     </div>
                     <div className="detail-prop-row">
-                      <div className="detail-prop-label">已加载</div>
+                      <div className="detail-prop-label">{t('market.registryLoaded')}</div>
                       <div className="detail-prop-value">
                         {marketSkillCounts.get(selectedMarketRegistry.id) ?? 0}
                       </div>
                     </div>
                     <div className="detail-prop-row">
-                      <div className="detail-prop-label">Manifest</div>
+                      <div className="detail-prop-label">{t('common.manifest')}</div>
                       <div className="detail-prop-value">
                         {isExternalUrl(selectedMarketRegistry.manifestUrl) ? (
                           <button
@@ -2089,7 +2320,7 @@ export default function App() {
                             onClick={() => {
                               void handleOpenExternal(selectedMarketRegistry.manifestUrl)
                             }}
-                            title={`在浏览器打开 ${selectedMarketRegistry.manifestUrl}`}
+                            title={t('common.openExternal', { url: selectedMarketRegistry.manifestUrl })}
                             type="button"
                           >
                             {selectedMarketRegistry.manifestUrl}
@@ -2100,7 +2331,7 @@ export default function App() {
                       </div>
                     </div>
                     <div className="detail-prop-row">
-                      <div className="detail-prop-label">安装位置</div>
+                      <div className="detail-prop-label">{t('market.installLocation')}</div>
                       <div className="detail-prop-value">
                         <span className="context-chip">
                           {marketSnapshot?.installBaseDir ?? '~/.Agents/skills'}
@@ -2109,7 +2340,7 @@ export default function App() {
                     </div>
                     {selectedMarketRegistry.error ? (
                       <div className="detail-prop-row">
-                        <div className="detail-prop-label">错误</div>
+                        <div className="detail-prop-label">{t('common.error')}</div>
                         <div className="detail-prop-value registry-error-text">
                           {selectedMarketRegistry.error}
                         </div>
@@ -2119,15 +2350,15 @@ export default function App() {
                 ) : (
                   <>
                     <div className="detail-prop-row">
-                      <div className="detail-prop-label">Registry</div>
+                      <div className="detail-prop-label">{t('common.registry')}</div>
                       <div className="detail-prop-value">{marketRegistries.length}</div>
                     </div>
                     <div className="detail-prop-row">
-                      <div className="detail-prop-label">远端</div>
+                      <div className="detail-prop-label">{t('market.remoteCount')}</div>
                       <div className="detail-prop-value">{remoteReadyRegistryCount}</div>
                     </div>
                     <div className="detail-prop-row">
-                      <div className="detail-prop-label">安装位置</div>
+                      <div className="detail-prop-label">{t('market.installLocation')}</div>
                       <div className="detail-prop-value">
                         <span className="context-chip">
                           {marketSnapshot?.installBaseDir ?? '~/.Agents/skills'}
@@ -2148,14 +2379,14 @@ export default function App() {
           <>
             <div className="status-strip-item">
               <Folders size={14} />
-              <span>{snapshot?.sources.length ?? 0} 个来源</span>
+              <span>{t('status.librarySources', { count: snapshot?.sources.length ?? 0 })}</span>
             </div>
             <div className="status-strip-item">
               <ShieldCheck size={14} />
-              <span>{skills.filter((skill) => skill.enabled && !skill.systemDisabled).length} 个已启用 skill</span>
+              <span>{t('status.libraryEnabledSkills', { count: skills.filter((skill) => skill.enabled && !skill.systemDisabled).length })}</span>
             </div>
             <div className="status-strip-item">
-              <span>最近刷新 {snapshot ? formatDate(snapshot.lastRefreshedAt) : '--'}</span>
+              <span>{t('status.lastRefresh', { date: snapshot ? formatDate(snapshot.lastRefreshedAt) : '--' })}</span>
             </div>
           </>
         ) : (
@@ -2163,13 +2394,20 @@ export default function App() {
             <div className="status-strip-item">
               <Store size={14} />
               <span>
-                远端源 {remoteReadyRegistryCount} 个，全部 registry {readyRegistryCount}/{marketRegistries.length || 0}
+                {t('status.marketRemoteSummary', {
+                  remote: remoteReadyRegistryCount,
+                  ready: readyRegistryCount,
+                  total: marketRegistries.length || 0,
+                })}
               </span>
             </div>
             <div className="status-strip-item">
               <Download size={14} />
               <span>
-                已加载 {visibleMarketSkills.length} 条，已安装 {visibleInstalledMarketCount} 条
+                {t('status.marketLoadedSummary', {
+                  loaded: visibleMarketSkills.length,
+                  installed: visibleInstalledMarketCount,
+                })}
               </span>
             </div>
             <div className="status-strip-item">
@@ -2194,8 +2432,8 @@ export default function App() {
           >
             <div className="modal-head">
               <div className="modal-head-copy">
-                <h2 id="add-registry-title">Add Registry</h2>
-                <p>支持本地 manifest、Claude Plugins API、SkillsLLM API 等真实数据源。</p>
+                <h2 id="add-registry-title">{t('dialog.addRegistryTitle')}</h2>
+                <p>{t('dialog.registrySupportNote')}</p>
               </div>
 
               <button
@@ -2209,28 +2447,28 @@ export default function App() {
 
             <div className="modal-body">
               <label className="modal-field">
-                <span>显示名称</span>
+                <span>{t('dialog.registryLabel')}</span>
                 <input
                   className="market-input"
                   onChange={(event) => setNewRegistryLabel(event.target.value)}
-                  placeholder="可选，例如 Claude Plugins"
+                  placeholder={t('dialog.registryLabelPlaceholder')}
                   value={newRegistryLabel}
                 />
               </label>
 
               <label className="modal-field">
-                <span>Manifest / API URL</span>
+                <span>{t('dialog.registryUrl')}</span>
                 <input
                   autoFocus
                   className="market-input"
                   onChange={(event) => setNewRegistryUrl(event.target.value)}
-                  placeholder="例如 https://claude-plugins.dev/api/skills?limit=50"
+                  placeholder={t('dialog.registryUrlPlaceholder')}
                   value={newRegistryUrl}
                 />
               </label>
 
               <div className="modal-note">
-                <span>可直接添加：</span>
+                <span>{t('dialog.registryExamples')}</span>
                 <code>https://claude-plugins.dev/api/skills?limit=50</code>
                 <code>https://skillsllm.com/api/skills?limit=50</code>
               </div>
@@ -2242,7 +2480,7 @@ export default function App() {
                 onClick={() => setIsAddRegistryDialogOpen(false)}
                 type="button"
               >
-                取消
+                {t('dialog.cancel')}
               </button>
               <button
                 className="chrome-button is-primary"
@@ -2253,7 +2491,7 @@ export default function App() {
                 type="button"
               >
                 <FolderPlus size={15} />
-                {marketBusyAction === 'registry' ? '添加中...' : '添加 Registry'}
+                {marketBusyAction === 'registry' ? t('dialog.submitRegistryBusy') : t('dialog.submitRegistry')}
               </button>
             </div>
           </div>
@@ -2270,9 +2508,9 @@ export default function App() {
             boxShadow: 'var(--shadow-lg)', padding: '6px', display: 'flex', flexDirection: 'column', gap: '2px', width: '140px'
           }}>
             {[
-              { id: 'preview', label: '预览视图', icon: Eye },
-              { id: 'source', label: '查看源码', icon: FileCode2 },
-              { id: 'edit', label: '编辑内容', icon: PencilLine }
+              { id: 'preview', label: t('library.skillMode.previewTab'), icon: Eye },
+              { id: 'source', label: t('library.skillMode.sourceTab'), icon: FileCode2 },
+              { id: 'edit', label: t('library.skillMode.editTab'), icon: PencilLine }
             ].map(item => (
               <button
                 key={item.id}

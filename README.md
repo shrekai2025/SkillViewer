@@ -23,8 +23,10 @@ SkillViewer is a local-first macOS agent skill browser and management tool. It a
   Discover and install new skills directly from external or local registries with true one-click installation and management.
 - **Immersive Split-Screen Editor**:
   Say goodbye to crowded views. Double-click any skill to focus. Toggle a real-time Markdown preview via the customizable font-size pane, letting you craft prompts distraction-free inside the context split window.
-- **Theme Support**:
-  Silky-smooth light and dark modes syncing with your macOS appearance globally.
+- **Multi-Language (i18n)**:
+  Follows your system locale automatically. Manual override persists across restarts. Supports Simplified Chinese, English, and Japanese.
+- **Marketplace-origin Skill Update Detection**:
+  Skills installed from a Marketplace registry are tracked with version metadata. SkillViewer automatically checks whether newer versions are available and allows one-click in-place updates.
 
 ## Installation & macOS Security
 
