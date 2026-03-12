@@ -24,6 +24,18 @@ SkillViewer is a local-first macOS agent skill browser and management tool. It a
 - **Theme Support**:
   Silky-smooth light and dark modes syncing with your macOS appearance globally.
 
+## Installation & macOS Security
+
+Currently, the compiled SkillViewer app is **unsigned**. When you first open the downloaded `.dmg` or `.app`, macOS Gatekeeper will block it with an "App is damaged" or "Cannot be opened because the developer cannot be verified" warning.
+
+To bypass this and run the app safely, run the following command in your Terminal after dragging the app to your `Applications` folder:
+
+```bash
+sudo xattr -rd com.apple.quarantine /Applications/Skillviewer.app
+```
+
+Alternatively, you are fully encouraged to build the app from source!
+
 ## Development Setup
 
 ```bash
